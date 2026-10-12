@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a wrong ID, a bad merge or a missing entity
+    url: https://reep.football/submit
+    about: Data corrections go to the Reep Register, not to this repository.
+  - name: API access and partnerships
+    url: https://reep.football/api
+    about: How to get an API key and what the hosted API offers.

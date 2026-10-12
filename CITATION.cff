@@ -1,0 +1,17 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using these metadata."
+title: "reep: Python SDK and CLI for the Reep football entity register"
+type: software
+authors:
+  - name: "Withqwerty Ltd"
+    email: getintouch@withqwerty.com
+    website: "https://reep.football"
+repository-code: "https://github.com/withqwerty/reep-python"
+url: "https://reep.football"
+license: MIT
+version: 0.0.1
+keywords:
+  - football
+  - soccer
+  - entity resolution
+  - sports data

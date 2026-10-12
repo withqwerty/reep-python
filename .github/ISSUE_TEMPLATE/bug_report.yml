@@ -1,0 +1,49 @@
+name: Bug report
+description: The SDK or CLI does something wrong.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This form is for problems in the SDK or CLI code. A wrong ID in the register
+        data is a data correction: report it at https://reep.football/submit.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: The smallest code or command that shows the problem.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: The error message or output. With the CLI, add `--json` if you can.
+      render: text
+  - type: input
+    id: reep-version
+    attributes:
+      label: reep version
+      description: Output of `reep --version`.
+    validations:
+      required: true
+  - type: input
+    id: release-stamp
+    attributes:
+      label: Release stamp
+      description: The register release you used (shown by `reep status`), if any.
+  - type: input
+    id: environment
+    attributes:
+      label: Python version and operating system
+      placeholder: Python 3.13, macOS 15
+    validations:
+      required: true

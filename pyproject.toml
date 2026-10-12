@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling>=1.24"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
@@ -9,24 +9,124 @@ description = "Python SDK and CLI for the Reep football entity register (in deve
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
-requires-python = ">=3.10"
-authors = [{ name = "Withqwerty Ltd" }]
-keywords = ["football", "soccer", "entity-resolution", "crosswalk", "reep"]
+requires-python = ">=3.11"
+authors = [{ name = "Withqwerty Ltd", email = "getintouch@withqwerty.com" }]
+keywords = ["football", "soccer", "entity-resolution", "crosswalk", "sports-data", "reep"]
 classifiers = [
     "Development Status :: 1 - Planning",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Scientific/Engineering :: Information Analysis",
+    "Typing :: Typed",
 ]
+dependencies = []
 
 [project.urls]
 Homepage = "https://reep.football"
-API = "https://reep.football/api"
-Downloads = "https://reep.football/downloads"
+Source = "https://github.com/withqwerty/reep-python"
+Issues = "https://github.com/withqwerty/reep-python/issues"
+Changelog = "https://github.com/withqwerty/reep-python/blob/main/CHANGELOG.md"
 
 [project.scripts]
 reep = "reep.cli:main"
 
+[dependency-groups]
+dev = [
+    { include-group = "lint" },
+    { include-group = "test" },
+    { include-group = "typecheck" },
+    "pre-commit>=4.3",
+]
+lint = ["ruff>=0.17"]
+test = ["pytest>=9", "pytest-cov>=7"]
+typecheck = ["mypy>=2", { include-group = "test" }]
+
+[tool.uv]
+required-version = ">=0.13"
+
+[tool.hatch.build.targets.sdist]
+include = ["/src", "/tests", "/CHANGELOG.md", "/README.md", "/LICENSE"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/reep"]
+
+# --- ruff -------------------------------------------------------------------
+
+[tool.ruff]
+line-length = 88
+src = ["src", "tests"]
+
+[tool.ruff.format]
+# The plan's API sketch uses aligned annotation comments.
+exclude = ["docs/plan.md"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "I",        # isort
+    "UP",       # pyupgrade
+    "B",        # flake8-bugbear
+    "C4",       # flake8-comprehensions
+    "SIM",      # flake8-simplify
+    "RET",      # flake8-return
+    "PTH",      # flake8-use-pathlib
+    "TC",       # flake8-type-checking
+    "PT",       # flake8-pytest-style
+    "S",        # flake8-bandit
+    "T20",      # flake8-print: library code does not print
+    "N",        # pep8-naming
+    "D",        # pydocstyle
+    "RUF",      # ruff-specific rules
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D", "S101"]
+"src/reep/cli.py" = ["T201"]
+
+# --- mypy -------------------------------------------------------------------
+
+[tool.mypy]
+strict = true
+warn_unreachable = true
+enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
+files = ["src", "tests"]
+
+# --- pytest and coverage ----------------------------------------------------
+
+[tool.pytest.ini_options]
+minversion = "9.0"
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-markers", "--strict-config", "-m", "not network"]
+markers = [
+    "network: calls the live Reep release or API (deselected by default; run with -m network)",
+]
+xfail_strict = true
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+branch = true
+source = ["reep"]
+
+[tool.coverage.paths]
+source = ["src/reep", "*/site-packages/reep"]
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
+skip_covered = true
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    'if __name__ == "__main__":',
+]

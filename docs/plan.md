@@ -402,7 +402,7 @@ U3 and can run in parallel. Each ships as a minor release when it lands.
   `CHANGELOG.md`, updated in the same pull request as the change.
 - **Release steps:**
   1. Move the "Unreleased" section to the new version and set the version in
-     `pyproject.toml`.
+     `pyproject.toml` and `CITATION.cff`.
   2. Commit, then tag `vX.Y.Z` on `main`.
   3. The release workflow builds the sdist and wheel, checks that the tag matches the
      version, publishes to PyPI through Trusted Publishing with attestations, and creates
@@ -426,6 +426,9 @@ Done at the end of U3, before the 0.1.0 tag:
 - [ ] Add the OpenSSF Scorecard workflow and its badge.
 - [ ] Configure the PyPI Trusted Publisher for the `release.yml` workflow and the `pypi`
       environment.
+- [ ] Add the maintainer as a required reviewer on the `pypi` environment (GitHub offers
+      this for public repositories on the current plan).
+- [ ] Test the release workflow once against TestPyPI before the 0.1.0 tag.
 - [ ] Publish the docs site; add the docs URL to `pyproject.toml` and the README.
 - [ ] Point the legacy `reep-cli` repository to this repository and archive it.
 - [ ] Link the SDK from reep.football (API and downloads pages).

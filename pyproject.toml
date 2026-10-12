@@ -49,10 +49,10 @@ test = ["pytest>=9", "pytest-cov>=7"]
 typecheck = ["mypy>=2", { include-group = "test" }]
 
 [tool.uv]
-required-version = ">=0.13"
+required-version = ">=0.12"
 
 [tool.hatch.build.targets.sdist]
-include = ["/src", "/tests", "/CHANGELOG.md", "/README.md", "/LICENSE"]
+include = ["/src", "/tests", "/CHANGELOG.md", "/CITATION.cff", "/README.md", "/LICENSE"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/reep"]
@@ -101,6 +101,11 @@ strict = true
 warn_unreachable = true
 enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
 files = ["src", "tests"]
+
+# Lets editors that use Pyright or Pylance find the project environment.
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
 
 # --- pytest and coverage ----------------------------------------------------
 

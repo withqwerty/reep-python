@@ -1,6 +1,8 @@
+import re
 import runpy
 from importlib.metadata import version
 from importlib.resources import files
+from pathlib import Path
 
 import pytest
 
@@ -10,6 +12,13 @@ from reep.cli import main
 
 def test_version_matches_distribution_metadata() -> None:
     assert reep.__version__ == version("reep")
+
+
+def test_citation_version_matches_package_version() -> None:
+    citation = Path(__file__).parents[1] / "CITATION.cff"
+    match = re.search(r"^version:\s*(\S+)\s*$", citation.read_text(), re.MULTILINE)
+    assert match is not None
+    assert match.group(1) == reep.__version__
 
 
 def test_package_ships_type_information() -> None:

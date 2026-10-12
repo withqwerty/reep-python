@@ -33,5 +33,7 @@ Run all of them before you commit. A change is complete when they pass.
   public contract. Change them only together with the plan and the changelog.
 - Tests must not reach the network unless they carry the `network` marker.
 - Add a changelog entry under "Unreleased" for each user-visible change.
+- Pushing a `v*` tag publishes the package to PyPI. Only the maintainer pushes version
+  tags; agents do not create or push them.
 - Use British English in prose. Code identifiers follow the existing names.
 - Do not put personal data (for example an email address) in HTTP headers or logs.

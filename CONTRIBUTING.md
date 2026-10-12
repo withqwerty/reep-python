@@ -13,7 +13,7 @@ development environment, which checks a change must pass, and how releases work.
 
 ## Development set-up
 
-You need [uv](https://docs.astral.sh/uv/) 0.13 or later.
+You need [uv](https://docs.astral.sh/uv/) 0.12 or later.
 
 ```bash
 git clone https://github.com/withqwerty/reep-python.git
@@ -59,8 +59,8 @@ default. Run them with `uv run pytest -m network`.
 
 Maintainers release from `main`:
 
-1. Move the "Unreleased" changelog entries to the new version and set `version` in
-   `pyproject.toml`.
+1. Move the "Unreleased" changelog entries to the new version, and set the version in
+   `pyproject.toml` and `CITATION.cff` (a test checks that they match).
 2. Commit, then push a tag `vX.Y.Z`.
 3. The release workflow builds the package, checks that the tag matches the version,
    publishes to PyPI through Trusted Publishing, and creates a GitHub release.

@@ -26,7 +26,11 @@ def test_package_ships_type_information() -> None:
 
 
 def test_public_api_is_declared() -> None:
-    assert set(reep.__all__) == {"ReepError", "__version__"}
+    assert {"Register", "ProviderId", "ReepError", "catalog", "__version__"} <= set(
+        reep.__all__
+    )
+    for name in reep.__all__:
+        assert hasattr(reep, name), name
     assert issubclass(reep.ReepError, Exception)
 
 

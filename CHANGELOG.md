@@ -7,6 +7,23 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `ProviderId`, a validated `(provider, namespace, external_id)` triple, and the result
+  models `Resolution`, `IdState`, `Entity`, `EntityMatch`, `Translation`,
+  `ProviderNamespace` and `ReleaseInfo`.
+- `ReleaseClient`: reads `latest.json` and `release.json`, downloads files with resume and
+  retries, and checks each file's SHA-256 against the manifest.
+- `reep.catalog.sync()`: builds a local DuckDB catalogue (slim or full profile) from the
+  public release. `reep.catalog.import_release()` builds it from release files that are
+  already on disk.
+- `Register.local()`: offline lookups against the SDK catalogue, a shipped
+  `reep-register-v1.duckdb` file (`REEP_DUCKDB_PATH`) or a folder of release CSVs.
+  Methods: `resolve`, `resolve_many`, `resolve_frame` (pandas, polars, pyarrow),
+  `current`, `translate`, `entity`, `search`, `providers` and `namespaces`.
+- Merged IDs resolve to their survivor; withdrawn IDs return a typed status and no ID.
+- An error hierarchy under `ReepError`; each error has a code, a hint and a CLI exit code.
+
 ## [0.0.1] - 2026-10-12
 
 ### Added

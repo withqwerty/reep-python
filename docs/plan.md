@@ -105,6 +105,7 @@ public and follows the versioning policy in section 10.
 import reep
 
 reg = reep.Register.local()               # SDK cache, or REEP_DUCKDB_PATH if set
+reg = reep.Register.local(csv_dir="dl/")   # build from CSVs already on disk
 reg = reep.Register.api()                 # REEP_API_KEY from the environment
 
 pid = reep.ProviderId("transfermarkt", "spieler", "568177")
@@ -119,7 +120,7 @@ res.release_stamp                         # "20261005T180536Z"
 reg.current("rp9f56e8195ab573")           # -> IdState for a stored Reep ID:
                                           #    ACTIVE, RETIRED, REDIRECTED (survivor),
                                           #    WITHDRAWN (reason), or UNKNOWN
-reg.translate(pid, to="fbref")            # -> list[ProviderId]
+reg.translate(pid, to="fbref")            # -> Translation (resolution, targets: Bridge)
 reg.entity("rp4ef85015b8b5d6")            # -> Entity (type, status, label, bridges)
 reg.search("Cole Palmer", entity_type="player", limit=10)   # -> list[EntityMatch]
 reg.resolve_many(pids)                    # -> list[Resolution], batched
@@ -128,6 +129,7 @@ reg.providers()                           # -> list[ProviderNamespace] with row 
 reg.release                               # -> ReleaseInfo
 
 reep.catalog.sync(profile="slim")         # -> SyncResult (stamp before and after, method)
+reep.catalog.import_release(Path("dl/"))  # -> SyncResult, checked against release.json
 ```
 
 Rules for the API:
@@ -315,7 +317,8 @@ Sizes are estimates of production code plus tests.
 ### U3: API backend, CLI and 0.1.0 release
 
 - **Tasks:**
-  1. `backends/api.py`: `resolve`, `batch` (split into groups of 100), `entities`,
+  1. `backends/api.py`: `resolve`, `batch` (resolve items in groups of 20, entity items
+     in groups of 100, the API's limits), `entities`,
      `search`, `changes`, `key`; back-off on 429; a warning from `X-Reep-Key-Expires`;
      ETag support. There is no command that pages through the whole register.
   2. CLI (`reep`): `status`, `providers`, `resolve`, `current`, `translate`, `search`,

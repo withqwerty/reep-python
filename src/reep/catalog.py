@@ -1,0 +1,498 @@
+"""Keep the SDK's local catalogue current.
+
+The catalogue is a DuckDB file in the SDK cache directory. :func:`sync` downloads a
+release from the public bucket and builds the catalogue from it. :func:`import_release`
+builds the catalogue from release files that are already on disk.
+
+Profiles:
+
+* ``"slim"``: the ``bridges``, ``entities`` and ``redirects`` tables. These answer
+  every lookup except alias search.
+* ``"full"``: every CSV table in the release.
+
+``with_aliases=True`` adds the ``aliases`` table to the slim profile, which improves
+name search.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import shutil
+import time
+from contextlib import contextmanager
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+from reep import _store
+from reep.config import Settings
+from reep.errors import (
+    ChecksumMismatchError,
+    ConfigError,
+    UnsupportedReleaseError,
+)
+from reep.release import ReleaseClient, ReleaseManifest, sha256_file, validate_stamp
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
+    from pathlib import Path
+
+    from reep.release import ProgressCallback
+
+__all__ = [
+    "PROFILES",
+    "CatalogState",
+    "SyncResult",
+    "import_release",
+    "local_fingerprint",
+    "profile_tables",
+    "state",
+    "sync",
+]
+
+logger = logging.getLogger(__name__)
+
+#: The catalogue profiles.
+PROFILES: tuple[str, ...] = ("slim", "full")
+
+_TABLE_ROLES = frozenset({"canonical_csv", "overlay"})
+
+
+@dataclass(frozen=True, slots=True)
+class SyncResult:
+    """What a catalogue sync or import did.
+
+    Attributes:
+        path: The catalogue file.
+        profile: The catalogue profile.
+        method: ``"snapshot"``, ``"replay"``, ``"up_to_date"`` or ``"import"``.
+        stamp_before: The release stamp before the sync, if a catalogue existed.
+        stamp_after: The release stamp after the sync.
+        downloaded_bytes: The number of bytes downloaded.
+        seconds: How long the sync took.
+        notes: Information about the sync, for example why it did not replay the
+            changelog.
+    """
+
+    path: Path
+    profile: str
+    method: str
+    stamp_before: str | None
+    stamp_after: str | None
+    downloaded_bytes: int
+    seconds: float
+    notes: tuple[str, ...] = ()
+
+    @property
+    def changed(self) -> bool:
+        """Return ``True`` when the sync changed the catalogue."""
+        return self.method != "up_to_date"
+
+
+@dataclass(frozen=True, slots=True)
+class CatalogState:
+    """The state of the local catalogue file.
+
+    Attributes:
+        path: The catalogue file.
+        stamp: The release stamp.
+        profile: The profile.
+        source: How the catalogue was built.
+        tables: The tables in the catalogue.
+        built_at: When the catalogue was built.
+        bridge_attributes_stamp: The release that the bridge ``rung`` and
+            ``upstream_status`` values come from.
+        import_fingerprint: For an imported catalogue, a digest of the source
+            files' names, sizes and modification times.
+    """
+
+    path: Path
+    stamp: str | None
+    profile: str | None
+    source: str | None
+    tables: tuple[str, ...]
+    built_at: str | None
+    bridge_attributes_stamp: str | None
+    import_fingerprint: str | None = None
+
+
+def state(settings: Settings | None = None) -> CatalogState | None:
+    """Return the state of the local catalogue, or ``None`` if there is none.
+
+    Args:
+        settings: The settings; read from the environment when ``None``.
+
+    Returns:
+        The state, or ``None``.
+    """
+    settings = settings or Settings.from_env()
+    path = settings.catalog_path
+    if not path.is_file():
+        return None
+    con = _store.connect(path, read_only=True)
+    try:
+        meta = _store.read_metadata(con)
+        tables = tuple(sorted(_store.table_names(con)))
+    finally:
+        con.close()
+    return CatalogState(
+        path=path,
+        stamp=meta.get(_store.META_STAMP),
+        profile=meta.get(_store.META_PROFILE),
+        source=meta.get(_store.META_SOURCE),
+        tables=tables,
+        built_at=meta.get(_store.META_BUILT_AT),
+        bridge_attributes_stamp=meta.get(_store.META_BRIDGE_ATTRS),
+        import_fingerprint=meta.get(_store.META_IMPORT_FINGERPRINT),
+    )
+
+
+def local_fingerprint(source: Path) -> str:
+    """Return a digest of the release files in a directory.
+
+    The digest covers each file's name, size and modification time. It changes
+    when a file is added, removed or replaced.
+
+    Args:
+        source: The directory.
+
+    Returns:
+        The hex digest.
+    """
+    digest = hashlib.sha256()
+    for directory in (source, source / "csv"):
+        if not directory.is_dir():
+            continue
+        for path in sorted(directory.glob("*.csv.gz")) + sorted(
+            directory.glob("release.json")
+        ):
+            info = path.stat()
+            digest.update(f"{path.name}:{info.st_size}:{info.st_mtime_ns};".encode())
+    return digest.hexdigest()
+
+
+def profile_tables(
+    manifest: ReleaseManifest, profile: str, *, with_aliases: bool = False
+) -> list[str]:
+    """Return the tables of a profile that the release has.
+
+    Args:
+        manifest: The release manifest.
+        profile: ``"slim"`` or ``"full"``.
+        with_aliases: Add the ``aliases`` table to the slim profile.
+
+    Returns:
+        The table names.
+    """
+    _check_profile(profile)
+    if profile == "full":
+        return [
+            name
+            for name in manifest.tables
+            if (entry := manifest.table_file(name)) is not None
+            and (entry.role in _TABLE_ROLES or entry.role is None)
+        ]
+    tables = list(_store.SLIM_TABLES)
+    if with_aliases and manifest.table_file("aliases") is not None:
+        tables.append("aliases")
+    return tables
+
+
+def sync(
+    profile: str | None = None,
+    *,
+    stamp: str | None = None,
+    with_aliases: bool | None = None,
+    force: bool = False,
+    keep_downloads: bool = False,
+    settings: Settings | None = None,
+    client: ReleaseClient | None = None,
+    progress: Callable[[str, int, int | None], None] | None = None,
+) -> SyncResult:
+    """Bring the local catalogue to a release.
+
+    Args:
+        profile: ``"slim"`` or ``"full"``. ``None`` keeps the current catalogue's
+            profile, or uses ``"slim"`` when there is no catalogue.
+        stamp: The release to sync to; ``None`` means the current release.
+        with_aliases: Add aliases to a slim catalogue. ``None`` keeps the current
+            choice.
+        force: Rebuild the catalogue even when it is current.
+        keep_downloads: Keep the downloaded release files after the build.
+        settings: The settings; read from the environment when ``None``.
+        client: The release client to use.
+        progress: Called with ``(file_name, bytes_done, bytes_total)``.
+
+    Returns:
+        What the sync did.
+
+    Raises:
+        NetworkError: If a download fails.
+        ChecksumMismatchError: If a file does not match the manifest.
+        UnsupportedReleaseError: If the release format is not supported.
+    """
+    started = time.monotonic()
+    settings = settings or Settings.from_env()
+    before = state(settings)
+    chosen_profile = profile or (before.profile if before else None) or "slim"
+    _check_profile(chosen_profile)
+    aliases = (
+        with_aliases
+        if with_aliases is not None
+        else bool(before and "aliases" in before.tables)
+    )
+    with _client(client, settings) as rc:
+        manifest = rc.manifest(stamp)
+        wanted = profile_tables(manifest, chosen_profile, with_aliases=aliases)
+        if (
+            not force
+            and before is not None
+            and before.stamp == manifest.stamp
+            and before.profile == chosen_profile
+            and set(wanted) <= set(before.tables)
+        ):
+            return SyncResult(
+                path=settings.catalog_path,
+                profile=chosen_profile,
+                method="up_to_date",
+                stamp_before=before.stamp,
+                stamp_after=manifest.stamp,
+                downloaded_bytes=0,
+                seconds=time.monotonic() - started,
+            )
+        downloaded = _snapshot(
+            rc,
+            manifest,
+            wanted,
+            settings=settings,
+            profile=chosen_profile,
+            keep_downloads=keep_downloads,
+            progress=progress,
+        )
+    return SyncResult(
+        path=settings.catalog_path,
+        profile=chosen_profile,
+        method="snapshot",
+        stamp_before=before.stamp if before else None,
+        stamp_after=manifest.stamp,
+        downloaded_bytes=downloaded,
+        seconds=time.monotonic() - started,
+    )
+
+
+def import_release(
+    source: Path,
+    *,
+    profile: str = "slim",
+    with_aliases: bool = False,
+    stamp: str | None = None,
+    settings: Settings | None = None,
+    client: ReleaseClient | None = None,
+) -> SyncResult:
+    """Build the local catalogue from release files that are already on disk.
+
+    The directory can hold the files flat (``bridges.csv.gz``) or in a ``csv/``
+    subdirectory, as in the release. The import checks the files against a
+    manifest:
+
+    * a ``release.json`` in the directory, when there is one; otherwise
+    * the manifest of ``stamp`` from the release bucket, when ``stamp`` is given.
+
+    Without a manifest, the files are not checked and the catalogue has no stamp,
+    so a later :func:`sync` downloads a full snapshot.
+
+    Args:
+        source: The directory with the release files.
+        profile: ``"slim"`` or ``"full"``.
+        with_aliases: Add the aliases table to a slim catalogue.
+        stamp: The release the files come from, used to fetch its manifest.
+        settings: The settings; read from the environment when ``None``.
+        client: The release client to use when ``stamp`` is given.
+
+    Returns:
+        What the import did.
+
+    Raises:
+        ConfigError: If the directory lacks a required table.
+        ChecksumMismatchError: If a file does not match the manifest.
+        UnsupportedReleaseError: If the release format is not supported.
+    """
+    started = time.monotonic()
+    _check_profile(profile)
+    settings = settings or Settings.from_env()
+    if not source.is_dir():
+        raise ConfigError(f"{source} is not a directory.")
+    before = state(settings)
+    manifest: ReleaseManifest | None = None
+    local_manifest = source / "release.json"
+    if local_manifest.is_file():
+        manifest = ReleaseManifest.from_json(
+            json.loads(local_manifest.read_text(encoding="utf-8"))
+        )
+        if stamp is not None and manifest.stamp != stamp:
+            raise ConfigError(
+                f"{local_manifest} is for release {manifest.stamp}, not {stamp}."
+            )
+    elif stamp is not None:
+        validate_stamp(stamp)
+        with _client(client, settings) as rc:
+            manifest = rc.manifest(stamp)
+    files = _local_tables(source)
+    if manifest is not None:
+        wanted = [
+            t
+            for t in profile_tables(manifest, profile, with_aliases=with_aliases)
+            if t in files or t in _store.SLIM_TABLES
+        ]
+    else:
+        wanted = list(_store.SLIM_TABLES)
+        if profile == "full":
+            wanted = sorted(files)
+        elif with_aliases and "aliases" in files:
+            wanted.append("aliases")
+    missing = [t for t in wanted if t not in files]
+    if missing:
+        raise ConfigError(
+            f"{source} lacks {', '.join(f'{t}.csv.gz' for t in missing)}.",
+            hint="Download the tables from https://reep.football/downloads.",
+        )
+    tables = {t: files[t] for t in wanted}
+    expected_rows: dict[str, int] = {}
+    if manifest is not None:
+        for table, path in tables.items():
+            entry = manifest.table_file(table)
+            if entry is None:
+                raise UnsupportedReleaseError(
+                    f"Release {manifest.stamp} does not list {table}.csv.gz."
+                )
+            actual = sha256_file(path)
+            if actual != entry.sha256:
+                raise ChecksumMismatchError(
+                    f"{path} does not match release {manifest.stamp} "
+                    f"(SHA-256 {actual}, expected {entry.sha256}).",
+                    hint="Check that every file comes from the same release.",
+                )
+            if entry.rows is not None:
+                expected_rows[table] = entry.rows
+    else:
+        logger.warning(
+            "No release manifest for %s; the files are not checked and the "
+            "catalogue has no release stamp.",
+            source,
+        )
+    _store.build_store(
+        _store.StoreSpec(
+            tables=tables,
+            stamp=manifest.stamp if manifest else None,
+            schema_version=manifest.schema_version if manifest else None,
+            profile=profile,
+            source="import",
+            generated_at=manifest.generated_at if manifest else None,
+            tier=manifest.tier if manifest else None,
+            expected_rows=expected_rows,
+            extra_meta={_store.META_IMPORT_FINGERPRINT: local_fingerprint(source)},
+        ),
+        settings.catalog_path,
+    )
+    notes = () if manifest else ("files not checked: no release manifest",)
+    return SyncResult(
+        path=settings.catalog_path,
+        profile=profile,
+        method="import",
+        stamp_before=before.stamp if before else None,
+        stamp_after=manifest.stamp if manifest else None,
+        downloaded_bytes=0,
+        seconds=time.monotonic() - started,
+        notes=notes,
+    )
+
+
+def _snapshot(
+    rc: ReleaseClient,
+    manifest: ReleaseManifest,
+    tables: list[str],
+    *,
+    settings: Settings,
+    profile: str,
+    keep_downloads: bool,
+    progress: Callable[[str, int, int | None], None] | None,
+) -> int:
+    download_dir = settings.downloads_dir / manifest.stamp
+    paths: dict[str, Path] = {}
+    expected_rows: dict[str, int] = {}
+    downloaded = 0
+    for table in tables:
+        entry = manifest.table_file(table)
+        if entry is None:
+            raise UnsupportedReleaseError(
+                f"Release {manifest.stamp} has no {table} table."
+            )
+        paths[table] = rc.download(
+            entry,
+            download_dir / entry.name,
+            progress=_named(progress, entry.name),
+        )
+        downloaded += entry.size
+        if entry.rows is not None:
+            expected_rows[table] = entry.rows
+    _store.build_store(
+        _store.StoreSpec(
+            tables=paths,
+            stamp=manifest.stamp,
+            schema_version=manifest.schema_version,
+            profile=profile,
+            source="download",
+            generated_at=manifest.generated_at,
+            tier=manifest.tier,
+            expected_rows=expected_rows,
+        ),
+        settings.catalog_path,
+    )
+    if not keep_downloads:
+        shutil.rmtree(download_dir, ignore_errors=True)
+    return downloaded
+
+
+def _local_tables(source: Path) -> dict[str, Path]:
+    found: dict[str, Path] = {}
+    for directory in (source, source / "csv"):
+        if not directory.is_dir():
+            continue
+        for path in sorted(directory.glob("*.csv.gz")):
+            name = path.name.removesuffix(".csv.gz")
+            if _store.known_tables([name]):
+                found.setdefault(name, path)
+    return found
+
+
+def _named(
+    progress: Callable[[str, int, int | None], None] | None, name: str
+) -> ProgressCallback | None:
+    if progress is None:
+        return None
+
+    def callback(done: int, total: int | None) -> None:
+        progress(name, done, total)
+
+    return callback
+
+
+def _check_profile(profile: str) -> None:
+    if profile not in PROFILES:
+        raise ConfigError(
+            f"Unknown catalogue profile {profile!r}.",
+            hint="Use 'slim' or 'full'.",
+        )
+
+
+@contextmanager
+def _client(
+    client: ReleaseClient | None, settings: Settings
+) -> Iterator[ReleaseClient]:
+    """Use the caller's client, or create one and close it afterwards."""
+    if client is not None:
+        yield client
+        return
+    with ReleaseClient(settings.releases_url) as owned:
+        yield owned

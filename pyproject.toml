@@ -26,7 +26,11 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Information Analysis",
     "Typing :: Typed",
 ]
-dependencies = []
+dependencies = [
+    "duckdb>=1.4",
+    "httpx>=0.27",
+    "platformdirs>=4.3",
+]
 
 [project.urls]
 Homepage = "https://reep.football"
@@ -37,6 +41,18 @@ Changelog = "https://github.com/withqwerty/reep-python/blob/main/CHANGELOG.md"
 [project.scripts]
 reep = "reep.cli:main"
 
+[project.optional-dependencies]
+pandas = [
+    "pandas>=2.2",
+]
+polars = [
+    "polars>=1.0",
+    "pyarrow>=17",
+]
+arrow = [
+    "pyarrow>=17",
+]
+
 [dependency-groups]
 dev = [
     { include-group = "lint" },
@@ -45,7 +61,14 @@ dev = [
     "pre-commit>=4.3",
 ]
 lint = ["ruff>=0.17"]
-test = ["pytest>=9", "pytest-cov>=7"]
+test = [
+    "hypothesis>=6.100",
+    "pandas>=2.2",
+    "polars>=1.0",
+    "pyarrow>=17",
+    "pytest>=9",
+    "pytest-cov>=7",
+]
 typecheck = ["mypy>=2", { include-group = "test" }]
 
 [tool.uv]
@@ -91,8 +114,14 @@ select = [
 convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["D", "S101"]
+# Tests: no docstrings, plain asserts, SQL built from test constants, and
+# annotation-only imports at runtime for readability.
+"tests/**" = ["D", "S101", "S608", "TC"]
 "src/reep/cli.py" = ["T201"]
+# SQL in these modules interpolates only validated table names and constant
+# fragments; every value is a bound parameter.
+"src/reep/_store.py" = ["S608"]
+"src/reep/backends/local.py" = ["S608"]
 
 # --- mypy -------------------------------------------------------------------
 
@@ -101,6 +130,11 @@ strict = true
 warn_unreachable = true
 enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
 files = ["src", "tests"]
+
+[[tool.mypy.overrides]]
+# pyarrow ships no type information; the tests use pandas without its stubs.
+module = ["pyarrow", "pyarrow.*", "pandas", "pandas.*"]
+ignore_missing_imports = true
 
 # Lets editors that use Pyright or Pylance find the project environment.
 [tool.pyright]

@@ -424,11 +424,11 @@ Done at the end of U3, before the 0.1.0 tag:
 - [ ] Turn on private vulnerability reporting and secret scanning with push protection.
 - [ ] Widen the CI matrix: every supported Python on Linux, macOS and Windows.
 - [ ] Add the OpenSSF Scorecard workflow and its badge.
-- [ ] Configure the PyPI Trusted Publisher for the `release.yml` workflow and the `pypi`
-      environment.
+- [x] Configure the PyPI Trusted Publisher for the `release.yml` workflow and the `pypi`
+      environment. Done 2026-10-13: the `withqwerty` PyPI organisation owns the project,
+      and the 0.0.1 release ran the workflow end to end.
 - [ ] Add the maintainer as a required reviewer on the `pypi` environment (GitHub offers
       this for public repositories on the current plan).
-- [ ] Test the release workflow once against TestPyPI before the 0.1.0 tag.
 - [ ] Publish the docs site; add the docs URL to `pyproject.toml` and the README.
 - [ ] Point the legacy `reep-cli` repository to this repository and archive it.
 - [ ] Link the SDK from reep.football (API and downloads pages).

@@ -24,6 +24,45 @@ policy in the changelog.
 .. autoclass:: reep.catalog.CatalogState
 ```
 
+## Database sync
+
+Needs the `db` extra and a database driver; see [](dbsync.md).
+
+```{eval-rst}
+.. autofunction:: reep.dbsync.sync
+
+.. autofunction:: reep.dbsync.review
+
+.. autoclass:: reep.dbsync.SyncReport
+   :members: planned, written, needs_review, outcomes, to_dict
+
+.. autoclass:: reep.dbsync.TargetReport
+   :members: needs_review, to_dict
+
+.. autofunction:: reep.dbsync.load_config
+
+.. autofunction:: reep.dbsync.parse_config
+
+.. autofunction:: reep.dbsync.config_template
+
+.. autoclass:: reep.dbsync.Config
+   :members: database_url, select
+
+.. autoclass:: reep.dbsync.TableConfig
+   :members: qualified_name, columns_for
+
+.. autoclass:: reep.dbsync.ProviderColumn
+   :members: key
+
+.. autodata:: reep.dbsync.OUTCOMES
+
+.. autodata:: reep.dbsync.REVIEW_OUTCOMES
+
+.. autodata:: reep.dbsync.STATUS_VALUES
+
+.. autodata:: reep.dbsync.REVIEW_COLUMNS
+```
+
 ## Models
 
 ```{eval-rst}
@@ -77,6 +116,7 @@ Every error has a `code` (used in JSON output), a `hint` and the CLI `exit_code`
 .. autoclass:: reep.InvalidReepIdError
 .. autoclass:: reep.InvalidArgumentError
 .. autoclass:: reep.ConfigError
+.. autoclass:: reep.DatabaseError
 .. autoclass:: reep.NotFoundError
 .. autoclass:: reep.AuthError
 .. autoclass:: reep.QuotaExceededError

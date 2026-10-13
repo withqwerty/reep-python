@@ -58,6 +58,22 @@ arrow = [
 keyring = [
     "keyring>=25",
 ]
+db = [
+    "pyyaml>=6.0",
+    "sqlalchemy>=2.1",
+]
+postgres = [
+    "psycopg[binary]>=3.2",
+    "reep[db]",
+]
+mysql = [
+    "pymysql>=1.1",
+    "reep[db]",
+]
+mssql = [
+    "pymssql>=2.3",
+    "reep[db]",
+]
 
 [dependency-groups]
 dev = [
@@ -78,11 +94,16 @@ test = [
     "jsonschema>=4.23",
     "pandas>=2.2",
     "polars>=1.0",
+    "psycopg[binary]>=3.2",
     "pyarrow>=17",
+    "pymssql>=2.3",
+    "pymysql>=1.1",
     "pytest>=9",
     "pytest-cov>=7",
+    "pyyaml>=6.0",
+    "sqlalchemy>=2.1",
 ]
-typecheck = ["mypy>=2", { include-group = "test" }]
+typecheck = ["mypy>=2", "types-pyyaml>=6.0", { include-group = "test" }]
 
 [tool.uv]
 required-version = ">=0.12"

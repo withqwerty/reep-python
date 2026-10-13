@@ -34,6 +34,9 @@ print(res.status, res.reep_id, res.label)  # found rp53af22bbeaa667 Cole Jermain
   return a status, never an empty ID.
 - Translates an ID from one provider to another, and adds Reep IDs to pandas, polars
   or pyarrow tables.
+- Fills Reep IDs and other providers' IDs into your own PostgreSQL, MySQL, SQL Server
+  or SQLite tables (`reep sync`). It runs as a dry run unless you add `--apply`, writes
+  only to empty cells, and lists the rows that need review (`reep review`).
 - Reads the SDK catalogue, release CSVs you already have, the release DuckDB file
   (`REEP_DUCKDB_PATH`), or the hosted API with a key (`REEP_API_KEY`).
 - Gives AI agents a stable interface: `--json` output with a versioned envelope, JSON
@@ -45,8 +48,8 @@ no dates of birth, so name matching gives unreliable results.
 ## Documentation
 
 The documentation is in [docs/](docs/index.md): a quickstart, the concepts (provider ID
-triples, stored-ID states, releases), the data sources, the command line and the
-Python API. Build it with `uv run --group docs sphinx-build docs docs/_build/html`.
+triples, stored-ID states, releases), the data sources, the database sync, the command
+line and the Python API. Build it with `uv run --group docs sphinx-build docs docs/_build/html`.
 
 ## Reporting a wrong ID
 

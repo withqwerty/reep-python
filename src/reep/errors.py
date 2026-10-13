@@ -15,6 +15,7 @@ __all__ = [
     "CatalogMissingError",
     "ChecksumMismatchError",
     "ConfigError",
+    "DatabaseError",
     "InvalidArgumentError",
     "InvalidProviderIdError",
     "InvalidReepIdError",
@@ -178,6 +179,16 @@ class RateLimitError(ApiError):
     """The API rate limit stopped the request, and the retries did not succeed."""
 
     code = "rate_limited"
+
+
+class DatabaseError(ReepError):
+    """The database sync cannot connect to, read or write the user's database.
+
+    The message does not contain the database password.
+    """
+
+    code = "database_error"
+    exit_code = 6
 
 
 class UnsupportedReleaseError(ReepError):

@@ -8,12 +8,15 @@ the `reep` command directly. These rules give correct answers:
 2. Add `--json` and read `data`. Check `data.status` before you use
    `data.reep_id`.
 3. Use the exit code: 0 success, 2 fix the arguments (the error has a `hint`),
-   3 not found, 5 no valid API key, 6 network, 7 no catalogue (run
-   `reep catalog sync`).
+   3 not found, 4 rows need review (database sync), 5 no valid API key,
+   6 network or database, 7 no catalogue (run `reep catalog sync`).
 4. Use `reep translate <id> --to <provider> --json` to go from one provider to
    another.
 5. Use `reep search` only to discover candidates for a person to confirm. Names are
    not unique, and the release has no dates of birth.
+6. `reep sync` writes to the user's database. Run it without `--apply` first, show
+   the user the planned counts, and add `--apply` only when the user agrees. Use
+   `reep review` to list the rows that need review.
 
 ```bash
 reep catalog sync --json

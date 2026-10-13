@@ -19,6 +19,10 @@ ENV_VARS = (
     "REEP_CONFIG_DIR",
     "REEP_BASE_URL",
     "REEP_RELEASES_URL",
+    "REEP_LOG_DIR",
+    "REEP_DATABASE_URL",
+    "DATABASE_URL",
+    "REEP_CONFIG",
 )
 
 

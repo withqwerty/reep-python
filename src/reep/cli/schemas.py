@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from reep.cli.output import SCHEMA_VERSION
+from reep.dbsync._plan import OUTCOMES
 from reep.models import ENTITY_TYPES, IdStatus, ResolutionStatus
 
 __all__ = ["COMMANDS", "envelope_schema", "error_schema"]
@@ -153,6 +154,43 @@ AUTH_STATUS = _object(
 )
 
 
+_COUNT = {"type": "integer", "minimum": 0}
+
+TARGET_REPORT = _object(
+    {
+        "table": _STR,
+        "entity_type": {"enum": list(ENTITY_TYPES)},
+        "target": _STR,
+        "column": _STR,
+        "rows": _COUNT,
+        "outcomes": _object(dict.fromkeys(OUTCOMES, _COUNT)),
+        "planned": _COUNT,
+        "written": _COUNT,
+        "status_planned": _COUNT,
+        "status_written": _COUNT,
+        "needs_review": _COUNT,
+    }
+)
+
+DB_SYNC_REPORT = _object(
+    {
+        "command": {"enum": ["sync", "review"]},
+        "apply": {"type": "boolean"},
+        "release_stamp": _OPT_STR,
+        "database": _STR,
+        "targets": {"type": "array", "items": TARGET_REPORT},
+        "outcomes": _object(dict.fromkeys(OUTCOMES, _COUNT)),
+        "planned": _COUNT,
+        "written": _COUNT,
+        "needs_review": _COUNT,
+        "review_file": _OPT_STR,
+        "run_log": _OPT_STR,
+        "seconds": {"type": "number"},
+        "notes": {"type": "array", "items": _STR},
+    }
+)
+
+
 def _many(item: dict[str, Any]) -> dict[str, Any]:
     return {"type": "array", "items": item}
 
@@ -175,6 +213,9 @@ COMMANDS: dict[str, dict[str, Any]] = {
     "auth status": AUTH_STATUS,
     "auth login": _object({"stored_in": _STR, "verified": {"type": "boolean"}}),
     "auth logout": _object({"removed_from": _many(_STR)}),
+    "init": _object({"path": _STR}),
+    "sync": DB_SYNC_REPORT,
+    "review": DB_SYNC_REPORT,
 }
 
 

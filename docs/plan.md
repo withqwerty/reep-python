@@ -35,7 +35,9 @@ the open crosswalk of football provider IDs. It gives a consumer a short, correc
 | Licence | Code: MIT. Register data: CC0-1.0. |
 | Incremental sync | Clients without an API key follow the changelog chain on the public release bucket. |
 | Python support | CPython versions that have not reached end of life: 3.11 to 3.14 at the time of writing. |
-| Database writes | Dry run by default; `--apply` writes. |
+| Database writes | Dry run by default; `--apply` writes. A cell is written only while it is NULL (an empty string is a value). |
+| Database sync source | The local catalogue only: the API's bridges carry no `upstream_status`, and bulk use belongs to the download (U4). |
+| Retired entities | The sync keeps or writes a retired entity's ID and counts it; it is not a review outcome (U4). |
 | Docs site | Sphinx with Furo, MyST Markdown, autodoc and sphinx-click (chosen in U3). |
 
 ## 3. Users and surfaces
@@ -249,6 +251,9 @@ exposed over MCP.
 | `REEP_CACHE_DIR` | Location of the SDK's own catalogue (default: the platform cache directory). |
 | `REEP_BASE_URL` | Override the API base URL (testing). |
 | `REEP_RELEASES_URL` | Override the release bucket URL (testing and mirrors). |
+| `REEP_LOG_DIR` | Location of the database sync's run log (default: the platform log directory). |
+| `REEP_DATABASE_URL`, `DATABASE_URL` | The database for `reep sync` when `reep.yml` names none. |
+| `REEP_CONFIG` | The `reep.yml` file for `reep sync` and `reep review`. |
 
 `REEP_API_KEY` and `REEP_DUCKDB_PATH` match the names other Reep tools use, so one setup
 serves all of them.
@@ -362,6 +367,14 @@ Sizes are estimates of production code plus tests.
   table with known, merged, withdrawn and unknown IDs and pre-filled columns.
 - **Acceptance:** one run gives the expected counts; a second run writes nothing; no
   pre-filled value changes.
+- **Built (2026-10-13):** `reep.yml` maps `provider/namespace` to columns, so each
+  provider column is both a source of the row's Reep ID and a target for
+  `reep sync <provider>`. A row's Reep ID comes from its stored Reep ID and its provider
+  IDs; when they point to different entities the row is a `conflict`. Each cell gets
+  one of 17 outcomes (`reep.dbsync.OUTCOMES`). Writes use reflected SQLAlchemy columns,
+  an `IS NULL` guard (or the old value for `--repair-redirected`) and one transaction.
+  Both `reep sync` and `reep review` exit with 4 when cells need review. Tests run on
+  SQLite and PostgreSQL locally, and on PostgreSQL, MySQL and SQL Server in CI.
 - **Size:** about 700 lines of code and 600 lines of tests.
 
 ### U5: Agent surfaces for end users

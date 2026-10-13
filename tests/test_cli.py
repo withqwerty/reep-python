@@ -42,7 +42,7 @@ class Cli:
             self.monkeypatch.setattr("sys.stdin", io.StringIO(stdin))
         code = main(list(args))
         out, err = self.capsys.readouterr()
-        if "--json" in args and code in (0, 3) and out.strip():
+        if "--json" in args and code in (0, 3, 4) and out.strip():
             doc = json.loads(out)
             command = doc["command"]
             jsonschema.validate(doc, envelope_schema(command))

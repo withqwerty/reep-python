@@ -52,6 +52,16 @@ JOIN bridges b
 ORDER BY q.idx, b.reep_id
 """
 
+_BRIDGES_FOR_IDS = """
+WITH q AS (SELECT DISTINCT unnest($ids) AS reep_id)
+SELECT b.reep_id, b.provider, b.namespace, b.external_id, nullif(b.rung, ''),
+       nullif(b.upstream_status, '')
+FROM q
+JOIN bridges b ON b.reep_id = q.reep_id
+WHERE b.provider = $provider AND ($namespace IS NULL OR b.namespace = $namespace)
+ORDER BY b.reep_id, b.namespace, b.external_id
+"""
+
 _STATES = """
 WITH q AS (SELECT DISTINCT unnest($ids) AS reep_id)
 SELECT q.reep_id, e.entity_type, e.status, nullif(e.label, ''),
@@ -250,6 +260,40 @@ class LocalBackend:
                 out.append((None, ResolutionStatus.WITHDRAWN.value))
             else:
                 out.append((state.current_id, ResolutionStatus.FOUND.value))
+        return out
+
+    def bridges_many(
+        self, reep_ids: Sequence[str], provider: str, namespace: str | None = None
+    ) -> dict[str, list[Bridge]]:
+        """Return the bridges of many entities at one provider.
+
+        Only bridges that name the given IDs are returned: the bridges of an ID
+        that merged into another stay with that ID.
+
+        Args:
+            reep_ids: Valid Reep IDs.
+            provider: The provider slug.
+            namespace: Return only this namespace; ``None`` for all.
+
+        Returns:
+            The bridges of each ID that has any, sorted by namespace and ID.
+        """
+        out: dict[str, list[Bridge]] = {}
+        if not reep_ids:
+            return out
+        rows = self._query(
+            _BRIDGES_FOR_IDS,
+            {"ids": list(reep_ids), "provider": provider, "namespace": namespace},
+        )
+        for rid, prov, ns, external_id, rung, upstream in rows:
+            out.setdefault(str(rid), []).append(
+                Bridge(
+                    provider_id=ProviderId(str(prov), str(ns), str(external_id)),
+                    reep_id=str(rid),
+                    rung=rung,
+                    upstream_status=upstream,
+                )
+            )
         return out
 
     def current_many(self, reep_ids: Sequence[str]) -> list[IdState]:

@@ -20,6 +20,7 @@ __all__ = [
     "ENV_CACHE_DIR",
     "ENV_CONFIG_DIR",
     "ENV_DUCKDB_PATH",
+    "ENV_LOG_DIR",
     "ENV_RELEASES_URL",
     "Settings",
 ]
@@ -35,6 +36,7 @@ ENV_CACHE_DIR = "REEP_CACHE_DIR"
 ENV_CONFIG_DIR = "REEP_CONFIG_DIR"
 ENV_BASE_URL = "REEP_BASE_URL"
 ENV_RELEASES_URL = "REEP_RELEASES_URL"
+ENV_LOG_DIR = "REEP_LOG_DIR"
 
 _APP = "reep"
 
@@ -53,6 +55,8 @@ class Settings:
             platform config directory).
         api_url: The API base URL (``REEP_BASE_URL``).
         releases_url: The release bucket URL (``REEP_RELEASES_URL``).
+        log_dir: The directory for run logs (``REEP_LOG_DIR``; default: the
+            platform log directory). ``None`` uses ``logs`` in the cache directory.
     """
 
     api_key: str | None
@@ -61,6 +65,7 @@ class Settings:
     config_dir: Path
     api_url: str = DEFAULT_API_URL
     releases_url: str = DEFAULT_RELEASES_URL
+    log_dir: Path | None = None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> Settings:
@@ -81,6 +86,7 @@ class Settings:
         duckdb_path = value(ENV_DUCKDB_PATH)
         cache_dir = value(ENV_CACHE_DIR)
         config_dir = value(ENV_CONFIG_DIR)
+        log_dir = value(ENV_LOG_DIR)
         return cls(
             api_key=value(ENV_API_KEY),
             duckdb_path=Path(duckdb_path).expanduser() if duckdb_path else None,
@@ -96,6 +102,11 @@ class Settings:
             ),
             api_url=(value(ENV_BASE_URL) or DEFAULT_API_URL).rstrip("/"),
             releases_url=(value(ENV_RELEASES_URL) or DEFAULT_RELEASES_URL).rstrip("/"),
+            log_dir=(
+                Path(log_dir).expanduser()
+                if log_dir
+                else platformdirs.user_log_path(_APP, appauthor=False)
+            ),
         )
 
     def with_cache_dir(self, cache_dir: Path) -> Settings:
@@ -118,3 +129,8 @@ class Settings:
     def downloads_dir(self) -> Path:
         """Return the directory for release downloads."""
         return self.cache_dir / "downloads"
+
+    @property
+    def run_log_path(self) -> Path:
+        """Return the file that ``reep sync`` and ``reep review`` append runs to."""
+        return (self.log_dir or self.cache_dir / "logs") / "dbsync-runs.jsonl"

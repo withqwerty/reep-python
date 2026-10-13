@@ -87,3 +87,67 @@ jobs:
           version-file: pyproject.toml
       - run: uv sync --locked --no-default-groups --group docs
       - run: uv run --no-sync sphinx-build -W --keep-going -b html docs docs/_build/html
+
+  databases:
+    name: Database sync (PostgreSQL, MySQL, SQL Server)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: reep
+          POSTGRES_PASSWORD: reep-test
+          POSTGRES_DB: reep_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U reep"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: reep-test
+          MYSQL_DATABASE: reep_test
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -preep-test"
+          --health-interval 5s --health-timeout 5s --health-retries 30
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-CU27-ubuntu-22.04
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: Reep-test-1234
+        ports: ["1433:1433"]
+    env:
+      # Throwaway credentials for the service containers of this job only.
+      REEP_TEST_POSTGRES_URL: postgresql://reep:reep-test@127.0.0.1:5432/reep_test
+      REEP_TEST_MYSQL_URL: mysql+pymysql://root:reep-test@127.0.0.1:3306/reep_test
+      REEP_TEST_MSSQL_URL: mssql+pymssql://sa:Reep-test-1234@127.0.0.1:1433/master
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version-file: pyproject.toml
+      - run: uv sync --locked --no-default-groups --group test
+      - name: Wait for the databases
+        run: |
+          uv run --no-sync python - <<'PY'
+          import os, time
+          import sqlalchemy as sa
+          for var in ("REEP_TEST_POSTGRES_URL", "REEP_TEST_MYSQL_URL", "REEP_TEST_MSSQL_URL"):
+              engine = sa.create_engine(os.environ[var])
+              for _ in range(90):
+                  try:
+                      with engine.connect():
+                          break
+                  except Exception:
+                      time.sleep(2)
+              else:
+                  raise SystemExit(f"{var}: the database did not start")
+              engine.dispose()
+              print(f"{var}: ready")
+          PY
+      - run: uv run --no-sync pytest tests/test_dbsync.py -v

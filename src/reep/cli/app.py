@@ -14,7 +14,7 @@ import traceback
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import click
 
@@ -29,6 +29,7 @@ from reep.cli.output import (
 )
 from reep.cli.schemas import COMMANDS, envelope_schema, error_schema
 from reep.config import Settings
+from reep.dbsync._plan import REVIEW_OUTCOMES
 from reep.errors import (
     AuthError,
     CatalogMissingError,
@@ -37,6 +38,7 @@ from reep.errors import (
     ReepError,
 )
 from reep.models import (
+    ENTITY_TYPES,
     Entity,
     IdState,
     ProviderId,
@@ -45,6 +47,9 @@ from reep.models import (
 )
 from reep.register import Register
 from reep.release import ReleaseClient
+
+if TYPE_CHECKING:
+    from reep.dbsync import SyncReport
 
 __all__ = ["cli", "main"]
 
@@ -985,6 +990,303 @@ def auth_logout(fmt: str | None) -> int:
     )
     out.emit({"removed_from": removed}, release_stamp=None, backend=None, text=text)
     return EXIT_OK
+
+
+# -- database sync -------------------------------------------------------------
+
+EXIT_NEEDS_REVIEW = 4
+
+
+def config_option(func: F) -> F:
+    """Add ``--config``."""
+    return click.option(
+        "-c",
+        "--config",
+        "config_path",
+        type=click.Path(dir_okay=False, path_type=Path),
+        help="The reep.yml file. Default: $REEP_CONFIG, then ./reep.yml.",
+    )(func)
+
+
+def db_sync_options(func: F) -> F:
+    """Add the options that ``reep sync`` and ``reep review`` share."""
+    func = click.option(
+        "--log/--no-log",
+        "log",
+        default=None,
+        help="Append the run to the run log (default: as reep.yml says, or on).",
+    )(func)
+    func = click.option(
+        "--log-file",
+        type=click.Path(dir_okay=False, path_type=Path),
+        help="Append the run to this file.",
+    )(func)
+    func = click.option(
+        "--db",
+        type=click.Path(dir_okay=False, path_type=Path),
+        help="Read this DuckDB catalogue in place of the SDK catalogue.",
+    )(func)
+    func = click.option(
+        "--entity-type",
+        type=click.Choice(list(ENTITY_TYPES)),
+        help="Only table entries of this entity type.",
+    )(func)
+    return click.option(
+        "--table",
+        "tables",
+        multiple=True,
+        help="Only this table entry of reep.yml (repeat for more).",
+    )(func)
+
+
+def _config_path(given: Path | None) -> Path:
+    if given is not None:
+        return given
+    env = os.environ.get("REEP_CONFIG", "").strip()
+    return Path(env).expanduser() if env else Path("reep.yml")
+
+
+def _run_log(log: bool | None, log_file: Path | None) -> Path | bool | None:
+    if log is False:
+        return False
+    if log_file is not None:
+        return log_file
+    return None
+
+
+def _db_sync_text(report: SyncReport) -> str:
+    rows = [
+        {
+            "table": t.table,
+            "target": t.target,
+            "column": t.column,
+            "rows": t.rows,
+            "new": t.outcomes.get("new", 0),
+            "repair": t.outcomes.get("repair", 0),
+            "unchanged": t.outcomes.get("unchanged", 0),
+            "retired": t.outcomes.get("retired", 0),
+            "review": t.needs_review,
+            "planned": t.planned + t.status_planned,
+            "written": t.written + t.status_written,
+        }
+        for t in report.targets
+    ]
+    header = render_fields(
+        [
+            ("release", report.release_stamp),
+            ("database", report.database),
+            (
+                "mode",
+                "applied"
+                if report.apply
+                else (
+                    "review (writes nothing)"
+                    if report.command == "review"
+                    else "dry run: nothing written; add --apply to write"
+                ),
+            ),
+            ("review file", str(report.review_file) if report.review_file else None),
+            ("run log", str(report.run_log) if report.run_log else None),
+        ]
+    )
+    table = render_table(
+        rows,
+        [
+            ("table", "table"),
+            ("target", "target"),
+            ("column", "column"),
+            ("rows", "rows"),
+            ("new", "new"),
+            ("repair", "repair"),
+            ("unchanged", "unchanged"),
+            ("retired", "retired"),
+            ("review", "review"),
+            ("planned", "planned"),
+            ("written", "written"),
+        ],
+    )
+    review = [
+        f"{name} {count}"
+        for name, count in report.outcomes.items()
+        if count and name in REVIEW_OUTCOMES
+    ]
+    lines = [header, "", table]
+    if review:
+        lines += ["", "Needs review: " + ", ".join(review) + "."]
+        if report.command == "sync":
+            lines.append("List the rows with: reep review")
+    lines += [f"Note: {n}" for n in report.notes]
+    return "\n".join(lines)
+
+
+def _emit_db_sync(out: Output, report: SyncReport) -> int:
+    data = report.to_dict()
+    out.emit(
+        data["targets"] if out.fmt == "jsonl" else data,
+        release_stamp=report.release_stamp,
+        backend="local",
+        text=_db_sync_text(report),
+    )
+    return EXIT_NEEDS_REVIEW if report.needs_review else EXIT_OK
+
+
+@cli.command()
+@click.option(
+    "--path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=Path("reep.yml"),
+    show_default=True,
+    help="Where to write the file.",
+)
+@click.option("--force", is_flag=True, help="Replace an existing file.")
+@output_options
+def init(path: Path, force: bool, fmt: str | None) -> int:
+    """Write an example reep.yml for 'reep sync' and 'reep review'.
+
+    Edit the file to name your tables, their primary keys, the Reep ID column
+    and the provider ID columns.
+
+    \b
+    Examples:
+      reep init
+      reep init --path config/reep.yml
+    """
+    from reep.dbsync import config_template
+
+    out = Output("init", fmt or "table")
+    target = path.expanduser()
+    if target.exists() and not force:
+        raise InvalidArgumentError(
+            f"{target} already exists.",
+            hint="Edit it, choose another --path, or add --force to replace it.",
+        )
+    target.write_text(config_template(), encoding="utf-8")
+    out.emit(
+        {"path": str(target)},
+        release_stamp=None,
+        backend=None,
+        text=f"Wrote {target}. Edit it, then run: reep sync reep",
+    )
+    return EXIT_OK
+
+
+@cli.command(name="sync")
+@click.argument("targets", nargs=-1, required=True)
+@config_option
+@click.option("--apply", is_flag=True, help="Write to the database (default: dry run).")
+@click.option(
+    "--repair-redirected",
+    is_flag=True,
+    help="Replace stored Reep IDs that merged into another ID with the survivor.",
+)
+@db_sync_options
+@output_options
+def sync_command(
+    targets: tuple[str, ...],
+    config_path: Path | None,
+    apply: bool,
+    repair_redirected: bool,
+    tables: tuple[str, ...],
+    entity_type: str | None,
+    db: Path | None,
+    log_file: Path | None,
+    log: bool | None,
+    fmt: str | None,
+) -> int:
+    """Fill Reep IDs, or other providers' IDs, into your database tables.
+
+    TARGETS is 'reep' for the Reep ID column, a provider such as 'fbref', or
+    provider/namespace. The sync matches exactly on provider IDs through the
+    local catalogue. It runs as a dry run unless you add --apply, and it writes
+    only to empty (NULL) cells, so it does not change existing values; the one
+    exception is --repair-redirected.
+
+    Exit code 4 means that some rows need review: run 'reep review' for the list.
+
+    \b
+    Examples:
+      reep sync reep                    # dry run: show what would change
+      reep sync reep --apply            # write the Reep IDs
+      reep sync reep fbref --apply      # then fill the FBref IDs
+      reep sync reep --apply --table players --json
+    """
+    from reep import dbsync
+
+    out = Output("sync", fmt or "table")
+    config = dbsync.load_config(_config_path(config_path))
+    with Register.local(db, settings=_settings()) as reg:
+        report = dbsync.sync(
+            config,
+            reg,
+            list(targets),
+            apply=apply,
+            repair_redirected=repair_redirected,
+            tables=list(tables) or None,
+            entity_type=entity_type,
+            run_log=_run_log(log, log_file),
+        )
+    return _emit_db_sync(out, report)
+
+
+@cli.command(name="review")
+@config_option
+@click.option(
+    "--output",
+    "-o",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=Path("reep-review.csv"),
+    show_default=True,
+    help="The CSV file of the cells that need review.",
+)
+@click.option(
+    "--target",
+    "targets",
+    multiple=True,
+    help="Only this target: 'reep', a provider, or provider/namespace (repeat for "
+    "more). Default: all.",
+)
+@db_sync_options
+@output_options
+def review_command(
+    config_path: Path | None,
+    output: Path,
+    targets: tuple[str, ...],
+    tables: tuple[str, ...],
+    entity_type: str | None,
+    db: Path | None,
+    log_file: Path | None,
+    log: bool | None,
+    fmt: str | None,
+) -> int:
+    """Check your tables and list the cells that need review, in a CSV file.
+
+    The review writes nothing to the database. It counts each outcome (new,
+    unchanged, redirected, withdrawn, unresolved, conflict, ...) for the Reep ID
+    column and every provider column.
+
+    Exit code 4 means that some cells need review.
+
+    \b
+    Examples:
+      reep review
+      reep review --target reep --output review.csv
+      reep review --table players --json
+    """
+    from reep import dbsync
+
+    out = Output("review", fmt or "table")
+    config = dbsync.load_config(_config_path(config_path))
+    with Register.local(db, settings=_settings()) as reg:
+        report = dbsync.review(
+            config,
+            reg,
+            output=output,
+            targets=list(targets) or None,
+            tables=list(tables) or None,
+            entity_type=entity_type,
+            run_log=_run_log(log, log_file),
+        )
+    return _emit_db_sync(out, report)
 
 
 # -- schema --------------------------------------------------------------------

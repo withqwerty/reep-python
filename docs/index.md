@@ -26,6 +26,7 @@ What the package does:
 - updates the local copy from the release changelogs, without a full download;
 - resolves merged IDs to their survivor, and reports withdrawn IDs with a status;
 - answers lookups offline, or through the hosted API with a key;
+- fills Reep IDs and provider IDs into your own database tables, with a review report;
 - gives AI agents a stable JSON output, clear errors and fixed exit codes.
 
 Matching is exact: every lookup uses the complete provider ID
@@ -38,6 +39,7 @@ Matching is exact: every lookup uses the complete provider ID
 quickstart
 concepts
 sources
+dbsync
 cli
 agents
 ```

@@ -36,6 +36,16 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `search`, `show`, `catalog sync`, `catalog import`, `auth login|status|logout` and
   `schema`. `--json` prints a versioned envelope, `--jsonl` prints one row per line,
   errors are JSON on stderr with a hint, and exit codes 0–7 each have one meaning.
+- Database sync: `reep init`, `reep sync TARGET...` and `reep review`, and the
+  `reep.dbsync` module. A `reep.yml` file names the tables, their primary keys, the Reep
+  ID column and the provider ID columns. The sync matches exactly through the local
+  catalogue, runs as a dry run unless `--apply` is given, writes a cell only while it is
+  NULL, and writes all cells of a run in one transaction. `--repair-redirected`
+  replaces stored Reep IDs that merged. `reep review` writes a CSV of the cells that
+  need review; both commands exit with 4 when such cells exist. Each run appends a line
+  to a run log (`REEP_LOG_DIR`). Extras: `reep[db]`, `reep[postgres]`, `reep[mysql]`
+  and `reep[mssql]`.
+- `DatabaseError` (exit code 6) for database connection and query failures.
 
 ### Changed
 

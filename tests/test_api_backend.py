@@ -1,0 +1,415 @@
+from __future__ import annotations
+
+import logging
+from collections.abc import Iterator
+from pathlib import Path
+
+import httpx
+import pandas as pd
+import pytest
+
+from reep import Register
+from reep.backends.api import ApiBackend
+from reep.config import Settings
+from reep.errors import (
+    ApiError,
+    AuthError,
+    InvalidArgumentError,
+    InvalidReepIdError,
+    NetworkError,
+    NotFoundError,
+    QuotaExceededError,
+    RateLimitError,
+    UnknownProviderError,
+)
+from reep.models import IdStatus, ProviderId, ResolutionStatus
+from tests.conftest import make_settings, no_sleep
+from tests.support.fake_api import BASE, EXPIRED_KEY, OVERLAY_TRIPLE, VALID_KEY, FakeApi
+from tests.support.fixture_release import (
+    CHELSEA,
+    DECORROBORATED,
+    MARESCA,
+    MERGED,
+    MERGED_TO_RETIRED,
+    OLD_SEASON,
+    PALMER,
+    RETIRED,
+    STAMP_1,
+    UNKNOWN,
+    UNPUBLISHED,
+    WITHHELD,
+    filler_id,
+)
+
+
+@pytest.fixture
+def fake() -> FakeApi:
+    return FakeApi()
+
+
+def _backend(fake: FakeApi, key: str = VALID_KEY, **kwargs: object) -> ApiBackend:
+    return ApiBackend(key, base_url=BASE, http=fake.client(), sleep=no_sleep, **kwargs)  # type: ignore[arg-type]
+
+
+@pytest.fixture
+def api(fake: FakeApi) -> Iterator[Register]:
+    with Register(_backend(fake)) as register:
+        yield register
+
+
+def test_release_info_and_providers(api: Register) -> None:
+    info = api.release
+    assert info.stamp == STAMP_1
+    assert info.backend == "api"
+    assert info.source == "api"
+    assert info.schema_version == "bridge-register-v1"
+    providers = {p.provider: p for p in api.providers()}
+    assert "wikidata" not in providers
+    assert providers["transfermarkt"].namespace is None
+    assert providers["transfermarkt"].bridge_count == 7
+    assert api.namespaces("transfermarkt") == []
+
+
+def test_resolve(api: Register) -> None:
+    res = api.resolve("transfermarkt/spieler/568177")
+    assert res.status is ResolutionStatus.FOUND
+    assert res.reep_id == PALMER
+    assert res.label == "Cole Palmer"
+    assert res.entity_status == "active"
+    assert res.bridge is not None
+    assert res.bridge.rung is None
+    assert res.release_stamp == STAMP_1
+    assert api.resolve("transfermarkt/trainer/568177").reep_id == MARESCA
+
+
+def test_resolve_follows_merges(api: Register) -> None:
+    res = api.resolve("whoscored/player/333")
+    assert res.reep_id == PALMER
+    assert res.redirected_from == MERGED
+    assert res.label == "Cole Palmer"
+    retired = api.resolve("wyscout/player/777")
+    assert retired.reep_id == RETIRED
+    assert retired.entity_status == "retired"
+
+
+def test_resolve_withdrawn_not_found_and_overlay(api: Register) -> None:
+    withdrawn = api.resolve("wyscout/player/444")
+    assert withdrawn.status is ResolutionStatus.WITHDRAWN
+    assert withdrawn.reep_id is None
+    assert api.resolve("transfermarkt/spieler/1").status is ResolutionStatus.NOT_FOUND
+    overlay = api.resolve(ProviderId(*OVERLAY_TRIPLE))
+    assert overlay.status is ResolutionStatus.NOT_FOUND
+
+
+def test_resolve_many_uses_batches_of_20(api: Register, fake: FakeApi) -> None:
+    pids = [ProviderId("filler", "player", f"player-{i}") for i in range(45)]
+    results = api.resolve_many(pids)
+    assert [r.reep_id for r in results] == [filler_id(i) for i in range(45)]
+    assert fake.batch_sizes == [20, 20, 5]
+
+
+def test_ambiguous_resolution(fake: FakeApi) -> None:
+    fake.index["opta", "person", "p1"].append(
+        {"reep_id": MARESCA, "entity_type": "coach", "namespace": "person"}
+    )
+    with Register(_backend(fake)) as api:
+        res = api.resolve("opta/person/p1")
+    assert res.status is ResolutionStatus.AMBIGUOUS
+    assert res.candidates == tuple(sorted((PALMER, MARESCA)))
+
+
+@pytest.mark.parametrize(
+    ("reep_id", "status", "current", "current_status"),
+    [
+        (PALMER, IdStatus.ACTIVE, PALMER, "active"),
+        (OLD_SEASON, IdStatus.RETIRED, OLD_SEASON, "retired"),
+        (MERGED, IdStatus.REDIRECTED, PALMER, "active"),
+        (MERGED_TO_RETIRED, IdStatus.REDIRECTED, RETIRED, "retired"),
+        (UNPUBLISHED, IdStatus.WITHDRAWN, None, None),
+        (DECORROBORATED, IdStatus.UNKNOWN, None, None),
+        (UNKNOWN, IdStatus.UNKNOWN, None, None),
+    ],
+)
+def test_current(
+    api: Register,
+    reep_id: str,
+    status: IdStatus,
+    current: str | None,
+    current_status: str | None,
+) -> None:
+    state = api.current(reep_id)
+    assert state.status is status
+    assert state.current_id == current
+    assert state.current_status == current_status
+
+
+def test_current_many_uses_batches_of_100(api: Register, fake: FakeApi) -> None:
+    ids = [filler_id(i) for i in range(150)]
+    states = api.current_many(ids)
+    assert all(s.status is IdStatus.ACTIVE for s in states)
+    assert fake.batch_sizes == [100, 50]
+
+
+def test_entity_and_translate(api: Register) -> None:
+    entity = api.entity(MERGED)
+    assert entity.reep_id == PALMER
+    assert entity.redirected_from == MERGED
+    assert entity.aliases == ("Cole Jermaine Palmer", "Палмер")
+    assert entity.country == "England"
+    assert entity.gender is None
+    assert [str(b.provider_id) for b in entity.bridges][:2] == [
+        "fbref/person/dc7f8a28",
+        "fotmob/person/1001",
+    ]
+    itself = api.entity(MERGED, follow_redirects=False)
+    assert itself.status == "redirected"
+    assert itself.reep_id == MERGED
+    with pytest.raises(NotFoundError):
+        api.entity(UNKNOWN)
+    targets = api.translate("transfermarkt/spieler/568177", "fbref").targets
+    assert [str(t.provider_id) for t in targets] == ["fbref/person/dc7f8a28"]
+
+
+def test_search(api: Register) -> None:
+    matches = api.search("cole palmer")
+    assert [m.reep_id for m in matches][:1] == [PALMER]
+    assert matches[0].rank == 0
+    assert matches[0].status is None
+    assert next(m.reep_id for m in api.search("chelsea", entity_type="team")) == CHELSEA
+    assert len(api.search("filler", limit=50)) == 20
+    assert len(api.search("filler", limit=5, offset=3)) == 5
+    with pytest.raises(InvalidArgumentError):
+        api.search("ab")
+
+
+def test_key_status_changes_and_releases_with_etag(fake: FakeApi) -> None:
+    backend = _backend(fake)
+    assert backend.key_status()["key"]["plan"] == "evaluation"
+    assert backend.changes(since=STAMP_1, limit=10)["count"] == 0
+    first = backend.releases()
+    second = backend.releases()
+    assert first == second
+    assert first["latest"] == STAMP_1
+    assert backend.key_days_remaining == 30
+    assert backend.key_expires_at is not None
+    backend.close()
+
+
+def test_resolve_frame_through_the_api(api: Register) -> None:
+    df = pd.DataFrame({"tm": ["568177", "1"]})
+    out = api.resolve_frame(
+        df, provider="transfermarkt", namespace="spieler", column="tm"
+    )
+    assert out["reep_id"].tolist()[0] == PALMER
+
+
+def test_register_api_needs_a_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("reep.auth._keyring", lambda: None)
+    settings = make_settings(tmp_path)
+    with pytest.raises(AuthError) as exc:
+        Register.api(settings=settings)
+    assert exc.value.exit_code == 5
+    assert exc.value.hint is not None
+    assert "reep auth login" in exc.value.hint
+
+
+def test_register_api_uses_the_environment_key(tmp_path: Path, fake: FakeApi) -> None:
+    settings = Settings(
+        api_key=VALID_KEY,
+        duckdb_path=None,
+        cache_dir=tmp_path,
+        config_dir=tmp_path,
+        api_url=BASE,
+    )
+    with Register.api(settings=settings, http=fake.client()) as api:
+        assert api.resolve("transfermarkt/spieler/568177").reep_id == PALMER
+        assert api.backend.name == "api"
+
+
+@pytest.mark.parametrize(
+    ("key", "message"),
+    [("wrong-key-000000000", "not valid"), (EXPIRED_KEY, "expired")],
+)
+def test_auth_errors(fake: FakeApi, key: str, message: str) -> None:
+    with Register(_backend(fake, key)) as api, pytest.raises(AuthError, match=message):
+        api.providers()
+
+
+@pytest.mark.parametrize(
+    ("status", "error"),
+    [
+        (402, QuotaExceededError),
+        (403, AuthError),
+        (500, ApiError),
+    ],
+)
+def test_http_errors(fake: FakeApi, status: int, error: type[Exception]) -> None:
+    fake.fail_statuses = [status]
+    with pytest.raises(error):
+        _backend(fake).providers()
+
+
+def test_rate_limit_retries_then_gives_up(fake: FakeApi) -> None:
+    fake.fail_statuses = [429, 503]
+    assert _backend(fake).providers()
+    fake.fail_statuses = [429] * 5
+    with pytest.raises(RateLimitError):
+        _backend(fake, retries=2).providers()
+
+
+def test_rate_limit_waits_for_the_reset_header(fake: FakeApi) -> None:
+    delays: list[float] = []
+    state = {"sent": False}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if not state["sent"]:
+            state["sent"] = True
+            return httpx.Response(
+                429,
+                json={"error": "rate_limited"},
+                headers={"X-Reep-Ratelimit-Reset": "1"},
+            )
+        return fake.handle(request)
+
+    backend = ApiBackend(
+        VALID_KEY,
+        base_url=BASE,
+        http=httpx.Client(transport=httpx.MockTransport(handler)),
+        sleep=delays.append,
+    )
+    backend.providers()
+    assert delays == [1.0]
+
+
+def test_network_errors(fake: FakeApi) -> None:
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        raise httpx.ConnectError("refused", request=request)
+
+    backend = ApiBackend(
+        VALID_KEY,
+        base_url=BASE,
+        http=httpx.Client(transport=httpx.MockTransport(handler)),
+        sleep=no_sleep,
+        retries=2,
+    )
+    with pytest.raises(NetworkError):
+        backend.providers()
+    assert calls["n"] == 3
+
+
+def test_api_side_errors_are_mapped(fake: FakeApi) -> None:
+    backend = _backend(fake)
+    with pytest.raises(UnknownProviderError, match="nope"):
+        backend.resolve_many([ProviderId("nope", "x", "1")])
+    with pytest.raises(InvalidReepIdError):
+        backend.current_many(["rx00000000000001"])
+    with pytest.raises(NotFoundError):
+        backend._get_json("/missing")
+
+
+def test_expiry_warning(fake: FakeApi, caplog: pytest.LogCaptureFixture) -> None:
+    fake.days_remaining = 3
+    backend = _backend(fake)
+    with caplog.at_level(logging.WARNING, logger="reep.backends.api"):
+        backend.providers()
+        backend.providers()
+    warnings = [r for r in caplog.records if "expires in 3 day" in r.getMessage()]
+    assert len(warnings) == 1
+
+
+def test_unexpected_batch_response() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"results": []})
+
+    backend = ApiBackend(
+        VALID_KEY,
+        base_url=BASE,
+        http=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    with pytest.raises(ApiError, match="unexpected"):
+        backend.current_many([PALMER])
+
+
+TRIPLES = [
+    "transfermarkt/spieler/568177",
+    "transfermarkt/trainer/568177",
+    "whoscored/player/333",
+    "wyscout/player/777",
+    "wyscout/player/444",
+    "transfermarkt/spieler/1",
+    "fotmob/person/1001",
+    "opta/team/t1",
+]
+IDS = [PALMER, OLD_SEASON, MERGED, MERGED_TO_RETIRED, UNPUBLISHED, UNKNOWN, CHELSEA]
+
+
+def test_parity_between_local_and_api(reg: Register, api: Register) -> None:
+    def resolution_view(r: object) -> tuple[object, ...]:
+        return (
+            r.status,  # type: ignore[attr-defined]
+            r.reep_id,  # type: ignore[attr-defined]
+            r.entity_type,  # type: ignore[attr-defined]
+            r.label,  # type: ignore[attr-defined]
+            r.entity_status,  # type: ignore[attr-defined]
+            r.redirected_from,  # type: ignore[attr-defined]
+        )
+
+    for local, remote in zip(
+        reg.resolve_many(TRIPLES), api.resolve_many(TRIPLES), strict=True
+    ):
+        assert resolution_view(local) == resolution_view(remote), local.query
+    for local_state, remote_state in zip(
+        reg.current_many(IDS), api.current_many(IDS), strict=True
+    ):
+        assert (
+            local_state.status,
+            local_state.current_id,
+            local_state.current_status,
+        ) == (
+            remote_state.status,
+            remote_state.current_id,
+            remote_state.current_status,
+        ), local_state.reep_id
+        if local_state.status is not IdStatus.WITHDRAWN:
+            assert local_state.label == remote_state.label
+    for rid in (PALMER, MERGED, CHELSEA):
+        local_entity, remote_entity = reg.entity(rid), api.entity(rid)
+        assert (
+            local_entity.reep_id,
+            local_entity.entity_type,
+            local_entity.status,
+            local_entity.label,
+            local_entity.aliases,
+            local_entity.redirected_from,
+        ) == (
+            remote_entity.reep_id,
+            remote_entity.entity_type,
+            remote_entity.status,
+            remote_entity.label,
+            remote_entity.aliases,
+            remote_entity.redirected_from,
+        )
+        assert [b.provider_id for b in local_entity.bridges] == [
+            b.provider_id for b in remote_entity.bridges
+        ]
+    for query in ("cole palmer", "chelsea"):
+        assert [m.reep_id for m in reg.search(query)] == [
+            m.reep_id for m in api.search(query)
+        ]
+    local_t = reg.translate("transfermarkt/spieler/568177", "fotmob")
+    remote_t = api.translate("transfermarkt/spieler/568177", "fotmob")
+    assert {t.provider_id for t in local_t.targets} == {
+        t.provider_id for t in remote_t.targets
+    }
+
+
+def test_known_differences_from_the_local_backend(reg: Register, api: Register) -> None:
+    """The API cannot tell removed tombstones apart from unknown IDs."""
+    for rid in (DECORROBORATED, WITHHELD):
+        assert reg.current(rid).status is IdStatus.WITHDRAWN
+        assert api.current(rid).status is IdStatus.UNKNOWN

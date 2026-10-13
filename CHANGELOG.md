@@ -27,6 +27,19 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   release to the target release and downloads a snapshot when it cannot (no prior,
   unknown format, broken or long chain, or a chain larger than the bridges file).
   `SyncResult.notes` gives the reason. `method="replay"` raises `ReplayError` instead.
+- `Register.api()`: the same lookups through the hosted API (`/api/v1`) with a key.
+  Resolve batches go 20 at a time and entity batches 100 at a time (the API's limits);
+  rate-limited requests back off; a key that expires within 7 days logs a warning.
+- API key storage: `REEP_API_KEY`, the OS keyring (extra `reep[keyring]`) or a config
+  file with mode 600.
+- The `reep` command: `status`, `providers`, `resolve`, `current`, `translate`,
+  `search`, `show`, `catalog sync`, `catalog import`, `auth login|status|logout` and
+  `schema`. `--json` prints a versioned envelope, `--jsonl` prints one row per line,
+  errors are JSON on stderr with a hint, and exit codes 0–7 each have one meaning.
+
+### Changed
+
+- The `reep` command replaces the 0.0.1 placeholder message.
 
 ## [0.0.1] - 2026-10-12
 

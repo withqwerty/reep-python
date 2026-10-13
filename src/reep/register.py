@@ -12,10 +12,12 @@ import numbers
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Self, TypeVar
 
-from reep import catalog
+from reep import auth, catalog
+from reep.backends.api import ApiBackend
 from reep.backends.local import LocalBackend
 from reep.config import Settings
 from reep.errors import (
+    AuthError,
     InvalidArgumentError,
     InvalidProviderIdError,
     NotFoundError,
@@ -39,6 +41,8 @@ from reep.models import (
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
     from types import TracebackType
+
+    import httpx
 
     from reep.backends.base import Backend
 
@@ -116,6 +120,44 @@ class Register:
         if settings.duckdb_path is not None:
             return cls(LocalBackend(settings.duckdb_path))
         return cls(LocalBackend(settings.catalog_path))
+
+    @classmethod
+    def api(
+        cls,
+        key: str | None = None,
+        *,
+        base_url: str | None = None,
+        settings: Settings | None = None,
+        http: httpx.Client | None = None,
+    ) -> Self:
+        """Open a register that uses the hosted API.
+
+        Args:
+            key: The API key. ``None`` uses ``REEP_API_KEY``, then the key stored by
+                ``reep auth login``.
+            base_url: The API base URL; the default is ``https://reep.football/api/v1``
+                (or ``REEP_BASE_URL``).
+            settings: The settings; read from the environment when ``None``.
+            http: An ``httpx.Client`` to use, for example in tests.
+
+        Returns:
+            The register.
+
+        Raises:
+            AuthError: If no key is available.
+        """
+        settings = settings or Settings.from_env()
+        api_key = key or auth.load_key(settings)
+        if not api_key:
+            raise AuthError(
+                "No Reep API key.",
+                hint="Set REEP_API_KEY, or run 'reep auth login'. Request a key at "
+                "https://reep.football/api. The local catalogue needs no key: run "
+                "'reep catalog sync'.",
+            )
+        return cls(
+            ApiBackend(api_key, base_url=base_url or settings.api_url, http=http)
+        )
 
     @property
     def backend(self) -> Backend:

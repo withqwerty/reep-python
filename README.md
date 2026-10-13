@@ -40,7 +40,8 @@ print(res.status, res.reep_id, res.label)  # found rp53af22bbeaa667 Cole Jermain
 - Reads the SDK catalogue, release CSVs you already have, the release DuckDB file
   (`REEP_DUCKDB_PATH`), or the hosted API with a key (`REEP_API_KEY`).
 - Gives AI agents a stable interface: `--json` output with a versioned envelope, JSON
-  errors with hints, and fixed exit codes.
+  errors with hints, fixed exit codes, a skill file (`reep skill install`) and a
+  read-only MCP server (`reep mcp`, extra `reep[mcp]`).
 
 Matching is exact. The package does not match records by name: the public release has
 no dates of birth, so name matching gives unreliable results.

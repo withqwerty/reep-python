@@ -63,6 +63,18 @@ Needs the `db` extra and a database driver; see [](dbsync.md).
 .. autodata:: reep.dbsync.REVIEW_COLUMNS
 ```
 
+## MCP server
+
+Needs the `mcp` extra; see [](agents.md).
+
+```{eval-rst}
+.. autofunction:: reep.mcp.create_server
+
+.. autodata:: reep.mcp.TOOLS
+
+.. autodata:: reep.mcp.MAX_LIMIT
+```
+
 ## Models
 
 ```{eval-rst}

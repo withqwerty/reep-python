@@ -214,6 +214,7 @@ COMMANDS: dict[str, dict[str, Any]] = {
     "auth login": _object({"stored_in": _STR, "verified": {"type": "boolean"}}),
     "auth logout": _object({"removed_from": _many(_STR)}),
     "init": _object({"path": _STR}),
+    "skill install": _object({"path": _STR, "changed": {"type": "boolean"}}),
     "sync": DB_SYNC_REPORT,
     "review": DB_SYNC_REPORT,
 }

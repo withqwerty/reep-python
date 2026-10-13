@@ -12,13 +12,13 @@ import os
 import sys
 import traceback
 from collections.abc import Callable, Sequence
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import click
 
 from reep import auth, catalog
+from reep._status import status_data
 from reep._version import __version__
 from reep.cli.output import (
     Output,
@@ -33,6 +33,7 @@ from reep.dbsync._plan import REVIEW_OUTCOMES
 from reep.errors import (
     AuthError,
     CatalogMissingError,
+    ConfigError,
     InvalidArgumentError,
     NetworkError,
     ReepError,
@@ -46,7 +47,6 @@ from reep.models import (
     Translation,
 )
 from reep.register import Register
-from reep.release import ReleaseClient
 
 if TYPE_CHECKING:
     from reep.dbsync import SyncReport
@@ -343,53 +343,13 @@ def status(fmt: str | None, check_latest: bool) -> int:
       reep status --check-latest --json
     """
     out = Output("status", fmt or "table")
-    settings = _settings()
-    state = catalog.state(settings)
-    catalog_data: dict[str, Any] | None = None
-    if state is not None:
-        age = None
-        if state.built_at:
-            built = datetime.fromisoformat(state.built_at)
-            age = round((datetime.now(UTC) - built).total_seconds() / 86400, 1)
-        catalog_data = {
-            "path": str(state.path),
-            "stamp": state.stamp,
-            "profile": state.profile,
-            "source": state.source,
-            "built_at": state.built_at,
-            "age_days": age,
-            "bridge_attributes_stamp": state.bridge_attributes_stamp,
-            "tables": list(state.tables),
-        }
-    duck: dict[str, Any] | None = None
-    if settings.duckdb_path is not None:
-        duck = {
-            "path": str(settings.duckdb_path),
-            "exists": settings.duckdb_path.is_file(),
-        }
-    key_source = auth.key_source(settings)
-    if settings.duckdb_path is not None or state is not None:
-        backend: str | None = "local"
-    elif key_source:
-        backend = "api"
-    else:
-        backend = None
-    latest: str | None = None
-    update: bool | None = None
-    if check_latest:
-        with ReleaseClient(settings.releases_url) as rc:
-            latest = rc.latest().stamp
-        update = bool(state and state.stamp != latest)
-    data = {
-        "backend": backend,
-        "catalog": catalog_data,
-        "duckdb_path": duck,
-        "api": {"key_source": key_source, "base_url": settings.api_url},
-        "releases_url": settings.releases_url,
-        "latest_stamp": latest,
-        "update_available": update,
-    }
-    stamp = state.stamp if state else None
+    data, stamp = status_data(_settings(), check_latest=check_latest)
+    backend = data["backend"]
+    catalog_data = data["catalog"]
+    duck = data["duckdb_path"]
+    key_source = data["api"]["key_source"]
+    latest = data["latest_stamp"]
+    update = data["update_available"]
     text = render_fields(
         [
             ("backend", backend or "none (run 'reep catalog sync')"),
@@ -1287,6 +1247,127 @@ def review_command(
             run_log=_run_log(log, log_file),
         )
     return _emit_db_sync(out, report)
+
+
+# -- agent surfaces ------------------------------------------------------------
+
+
+@cli.command(name="mcp")
+@backend_options
+def mcp_command(use_api: bool | None, db: Path | None) -> int:
+    """Serve read-only Reep lookups to AI agents over MCP (stdio).
+
+    The tools are resolve, translate, current, entity, search, providers and
+    status. Each returns the same envelope as --json. Needs the mcp extra:
+    pip install 'reep[mcp]'.
+
+    \b
+    Examples:
+      reep mcp
+      claude mcp add reep -- reep mcp
+      reep mcp --api
+    """
+    try:
+        from reep.mcp import create_server
+    except ImportError as exc:
+        raise ConfigError(
+            "The MCP server needs the 'mcp' package.",
+            hint="Install it with: pip install 'reep[mcp]' (or uv tool install "
+            "'reep[mcp]').",
+        ) from exc
+    settings = _settings()
+    if use_api is None and db is None:
+        local = settings.duckdb_path is not None or settings.catalog_path.is_file()
+        open_world = not local and bool(auth.load_key(settings))
+    else:
+        open_world = bool(use_api) and db is None
+    server = create_server(
+        lambda: open_register(settings, use_api=use_api, db=db),
+        settings=settings,
+        open_world=open_world,
+    )
+    server.run("stdio")
+    return EXIT_OK
+
+
+@cli.group(name="skill", context_settings=_CONTEXT)
+def skill_group() -> None:
+    """Print or install the agent skill file (SKILL.md) for AI agents."""
+
+
+def _skill_text() -> str:
+    from importlib.resources import files
+
+    return files("reep.skill").joinpath("SKILL.md").read_text(encoding="utf-8")
+
+
+@skill_group.command(name="print")
+def skill_print() -> int:
+    """Print the skill file.
+
+    \b
+    Examples:
+      reep skill print
+      reep skill print > ~/agents/reep/SKILL.md
+    """
+    click.echo(_skill_text(), nl=False)
+    return EXIT_OK
+
+
+@skill_group.command(name="install")
+@click.option(
+    "--dir",
+    "directory",
+    type=click.Path(file_okay=False, path_type=Path),
+    help="The skills folder; the file goes to DIR/reep/SKILL.md. Default: "
+    "~/.claude/skills (Claude Code, for all projects).",
+)
+@click.option(
+    "--project",
+    is_flag=True,
+    help="Install into ./.claude/skills (Claude Code, this project only).",
+)
+@click.option("--force", is_flag=True, help="Replace a skill file that differs.")
+@output_options
+def skill_install(
+    directory: Path | None, project: bool, force: bool, fmt: str | None
+) -> int:
+    """Install the skill file so that an agent learns the reep command.
+
+    \b
+    Examples:
+      reep skill install
+      reep skill install --project
+      reep skill install --dir ~/.config/agent/skills --json
+    """
+    out = Output("skill install", fmt or "table")
+    if directory is not None and project:
+        raise InvalidArgumentError("Use --dir or --project, not both.")
+    if directory is not None:
+        base = directory.expanduser()
+    elif project:
+        base = Path(".claude") / "skills"
+    else:
+        base = Path.home() / ".claude" / "skills"
+    target = base / "reep" / "SKILL.md"
+    text = _skill_text()
+    current = target.read_text(encoding="utf-8") if target.is_file() else None
+    if current is not None and current != text and not force:
+        raise InvalidArgumentError(
+            f"{target} exists and differs from this version's skill file.",
+            hint="Add --force to replace it.",
+        )
+    changed = current != text
+    if changed:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+    out.emit(
+        {"path": str(target), "changed": changed},
+        release_stamp=None,
+        backend=None,
+        text=f"{'Installed' if changed else 'Already installed:'} {target}",
+    )
+    return EXIT_OK
 
 
 # -- schema --------------------------------------------------------------------

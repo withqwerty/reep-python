@@ -74,6 +74,9 @@ mssql = [
     "pymssql>=2.3",
     "reep[db]",
 ]
+mcp = [
+    "mcp>=2.1",
+]
 
 [dependency-groups]
 dev = [
@@ -84,6 +87,7 @@ dev = [
 ]
 docs = [
     "furo>=2025.9.25",
+    "mcp>=2.1",
     "myst-parser>=4.0",
     "sphinx>=8.2",
     "sphinx-click>=6.0",
@@ -92,6 +96,7 @@ lint = ["ruff>=0.17"]
 test = [
     "hypothesis>=6.100",
     "jsonschema>=4.23",
+    "mcp>=2.1",
     "pandas>=2.2",
     "polars>=1.0",
     "psycopg[binary]>=3.2",

@@ -6,6 +6,8 @@ Install: `pip install reep` or `uv tool install reep`. Get the data: `reep catal
 
 ## Docs
 
+- [llms-full.txt](llms-full.txt): every guide page, the agent skill file and the help text of every command, in one file
+
 - [Quickstart](https://github.com/withqwerty/reep-python/blob/main/docs/quickstart.md): install, sync, lookups from the CLI and Python
 - [Concepts](https://github.com/withqwerty/reep-python/blob/main/docs/concepts.md): provider ID triples, Reep IDs, resolution statuses, stored-ID states, releases
 - [Data sources](https://github.com/withqwerty/reep-python/blob/main/docs/sources.md): local catalogue, CSVs, the release DuckDB file, the hosted API and its differences

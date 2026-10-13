@@ -24,3 +24,46 @@ reep resolve transfermarkt spieler 568177 --json
 reep translate transfermarkt/spieler/568177 --to fbref --json
 reep current rc00cfa6784c6c23 --json
 ```
+
+## Skill file
+
+The package ships a skill file (`SKILL.md`) that teaches an agent these rules, the
+commands and the exit codes. Install it for Claude Code, or print it for another
+agent:
+
+```bash
+reep skill install             # ~/.claude/skills/reep/SKILL.md (all projects)
+reep skill install --project   # ./.claude/skills/reep/SKILL.md (this project)
+reep skill print               # print it, to copy into another agent's setup
+```
+
+## MCP server
+
+`reep mcp` serves the lookups as read-only MCP tools over stdio. It needs the `mcp`
+extra:
+
+```bash
+uv tool install 'reep[mcp]'    # or: pip install 'reep[mcp]'
+claude mcp add reep -- reep mcp
+```
+
+| Tool | Does |
+|---|---|
+| `resolve` | Resolves a provider ID (provider, namespace, external ID) to its Reep ID. |
+| `translate` | Returns another provider's IDs for the same entity. |
+| `current` | Returns the state of a stored Reep ID (active, redirected, withdrawn, ...). |
+| `entity` | Returns an entity with its label and all its provider IDs. |
+| `search` | Searches by name, for discovery only (at most 50 results per call). |
+| `providers` | Lists the provider and namespace pairs (at most 50 per call). |
+| `status` | Shows the local catalogue, its release and the backend in use. |
+
+Each tool returns the same envelope as `--json`. Errors are MCP tool errors whose
+text starts with the error code and ends with the hint. The server uses the local
+catalogue when one exists; `reep mcp --api` uses the hosted API. Database sync is
+not available over MCP.
+
+## Machine-readable docs
+
+`llms.txt` lists the documentation pages. `llms-full.txt` holds every guide page,
+the skill file and the help text of every command in one file; the docs build
+writes it.

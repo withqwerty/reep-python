@@ -46,6 +46,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   to a run log (`REEP_LOG_DIR`). Extras: `reep[db]`, `reep[postgres]`, `reep[mysql]`
   and `reep[mssql]`.
 - `DatabaseError` (exit code 6) for database connection and query failures.
+- `reep mcp`: a read-only MCP server over stdio (extra `reep[mcp]`) with the tools
+  `resolve`, `translate`, `current`, `entity`, `search`, `providers` and `status`. The
+  tools return the `--json` envelope; errors carry the error code and hint.
+- An agent skill file that ships in the package, with `reep skill print` and
+  `reep skill install`.
+- The docs build writes `llms-full.txt`: every guide page, the skill file and the help
+  text of every command.
 
 ### Changed
 

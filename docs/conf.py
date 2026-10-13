@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import sys
 from importlib.metadata import version as _version
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent / "_ext"))
 
 project = "reep"
 author = "Withqwerty Ltd"
@@ -16,13 +20,14 @@ extensions = [
     "sphinx.ext.napoleon",
     "sphinx.ext.intersphinx",
     "sphinx_click",
+    "llms_full",
 ]
 
 source_suffix = {".md": "markdown", ".rst": "restructuredtext"}
 root_doc = "index"
 # Keep "--option" as typed in command examples (no en dashes).
 smartquotes = False
-exclude_patterns = ["_build", "plan.md", "Thumbs.db", ".DS_Store"]
+exclude_patterns = ["_build", "_ext", "plan.md", "Thumbs.db", ".DS_Store"]
 
 myst_enable_extensions = ["colon_fence", "deflist"]
 myst_heading_anchors = 3

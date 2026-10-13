@@ -31,9 +31,11 @@ def no_sleep(_seconds: float) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def _clean_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     for name in ENV_VARS:
         monkeypatch.delenv(name, raising=False)
+    # Run logs from the database sync never reach the real log directory.
+    monkeypatch.setenv("REEP_LOG_DIR", str(tmp_path / "reep-logs"))
 
 
 @pytest.fixture(scope="session")

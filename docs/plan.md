@@ -390,6 +390,12 @@ Sizes are estimates of production code plus tests.
   triple; a test that the skill file's examples run against the fixture release.
 - **Acceptance:** an agent with only the skill file resolves a Transfermarkt ID to its
   FBref ID with the CLI.
+- **Built (2026-10-13):** `reep.mcp.create_server` opens the register on the first
+  tool call, so a missing catalogue is a tool error with a hint. The `status` tool and
+  `reep status` share one data builder and work without a catalogue. `SKILL.md` lives
+  in `reep/skill/`; a test runs each of its examples, in order, on a new machine
+  against the fixture release. A Sphinx extension (`docs/_ext/llms_full.py`) writes
+  `llms-full.txt`.
 - **Size:** about 400 lines of code and 300 lines of tests.
 
 ### Order

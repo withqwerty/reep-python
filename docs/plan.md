@@ -312,6 +312,13 @@ Sizes are estimates of production code plus tests.
   matches it.
 - **Acceptance:** a store at stamp N, after `reep catalog sync`, has the same bridge and
   redirect sets as a fresh build of stamp N+1.
+- **Built (2026-10-13):** the changelog carries bridge triples, entity type, status and
+  label, and merge redirects, but not the bridge `rung` and `upstream_status`, the other
+  entity columns, or the redirect rows without a target. The sync therefore downloads
+  `entities` and `redirects` again and replays only the bridges (about 65 MB in place of
+  207 MB for the 2026-10-05 release). Bridges added by a replay have an empty rung until
+  the next snapshot; the store records the stamp of its bridge attributes. The chain
+  limit is 30 releases until the retention rule is written.
 - **Size:** about 500 lines of code and 500 lines of tests.
 
 ### U3: API backend, CLI and 0.1.0 release

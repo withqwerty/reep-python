@@ -122,6 +122,7 @@ convention = "google"
 # fragments; every value is a bound parameter.
 "src/reep/_store.py" = ["S608"]
 "src/reep/backends/local.py" = ["S608"]
+"src/reep/changelog.py" = ["S608"]
 
 # --- mypy -------------------------------------------------------------------
 

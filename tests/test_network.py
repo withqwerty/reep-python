@@ -7,11 +7,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import duckdb
 import pytest
 
 from reep import Register, catalog
+from reep.changelog import Changelog
 from reep.config import Settings
 from reep.models import IdStatus, ResolutionStatus
+from reep.release import ReleaseClient
 
 pytestmark = pytest.mark.network
 
@@ -52,3 +55,46 @@ def test_live_sync_is_up_to_date_afterwards(live_settings: Settings) -> None:
 def test_cache_directory_is_used(live_settings: Settings) -> None:
     assert live_settings.catalog_path.is_file()
     assert Path(live_settings.cache_dir) in live_settings.catalog_path.parents
+
+
+def _difference(a: Path, b: Path, sql: str) -> int:
+    con = duckdb.connect()
+    try:
+        con.execute(f"ATTACH '{a}' AS a (READ_ONLY)")
+        con.execute(f"ATTACH '{b}' AS b (READ_ONLY)")
+        left = sql.format(db="a")
+        right = sql.format(db="b")
+        row = con.execute(
+            f"SELECT (SELECT count(*) FROM ({left} EXCEPT {right})) + "
+            f"(SELECT count(*) FROM ({right} EXCEPT {left}))"
+        ).fetchone()
+    finally:
+        con.close()
+    assert row is not None
+    return int(row[0])
+
+
+def test_live_replay_matches_a_fresh_build(
+    live_settings: Settings, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    fresh_state = catalog.state(live_settings)
+    assert fresh_state is not None
+    assert fresh_state.stamp is not None
+    target = fresh_state.stamp
+    scratch = tmp_path_factory.mktemp("changelog")
+    with ReleaseClient() as rc:
+        entry = rc.manifest(target).file("changelog.json.gz")
+        prior = Changelog.read(rc.download(entry, scratch / entry.name)).prior_stamp
+    assert prior is not None
+    settings = Settings.from_env(
+        {"REEP_CACHE_DIR": str(tmp_path_factory.mktemp("replay-cache"))}
+    )
+    catalog.sync(stamp=prior, settings=settings)
+    result = catalog.sync(stamp=target, settings=settings)
+    assert result.method == "replay", result.notes
+    for sql in (
+        "SELECT provider, namespace, external_id, reep_id FROM {db}.bridges",
+        "SELECT * FROM {db}.entities",
+        "SELECT from_id, coalesce(to_id, ''), reason FROM {db}.redirects",
+    ):
+        assert _difference(settings.catalog_path, live_settings.catalog_path, sql) == 0

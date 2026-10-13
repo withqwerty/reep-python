@@ -73,6 +73,13 @@ MATCH = "rm00000000000001"
 REFEREE = "ro00000000000001"
 UNKNOWN = "rp00000000000fff"
 
+FILLER_COUNT = 400
+
+
+def filler_id(i: int) -> str:
+    """Return the Reep ID of filler player ``i``."""
+    return f"rp{0xF00000 + i:014x}"
+
 
 def _entity(
     rid: str,
@@ -206,6 +213,14 @@ def state_1() -> ReleaseState:
             "language": "en",
         },
     ]
+    # Filler players give the bridge file a realistic size against the changelog.
+    for i in range(FILLER_COUNT):
+        rid = filler_id(i)
+        entities.append(_entity(rid, "player", "active", f"Filler Player {i:04d}"))
+        for namespace in ("player", "alt", "old"):
+            bridges.append(
+                _bridge("filler", namespace, f"{namespace}-{i}", rid, "footprint")
+            )
     return ReleaseState(entities, bridges, redirects, aliases)
 
 

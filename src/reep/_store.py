@@ -74,6 +74,8 @@ META_SOURCE = "sdk_source"
 META_BUILT_AT = "sdk_built_at"
 META_BRIDGE_ATTRS = "sdk_bridge_attributes_stamp"
 META_IMPORT_FINGERPRINT = "sdk_import_fingerprint"
+META_REPLAYED_FROM = "sdk_replayed_from"
+META_REPLAY_STEPS = "sdk_replay_steps"
 
 
 def connect(path: Path, *, read_only: bool) -> duckdb.DuckDBPyConnection:

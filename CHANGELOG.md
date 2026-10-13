@@ -23,6 +23,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `current`, `translate`, `entity`, `search`, `providers` and `namespaces`.
 - Merged IDs resolve to their survivor; withdrawn IDs return a typed status and no ID.
 - An error hierarchy under `ReepError`; each error has a code, a hint and a CLI exit code.
+- Incremental sync: `reep.catalog.sync()` replays the changelog chain from the local
+  release to the target release and downloads a snapshot when it cannot (no prior,
+  unknown format, broken or long chain, or a chain larger than the bridges file).
+  `SyncResult.notes` gives the reason. `method="replay"` raises `ReplayError` instead.
 
 ## [0.0.1] - 2026-10-12
 

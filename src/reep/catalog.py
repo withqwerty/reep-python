@@ -21,15 +21,19 @@ import json
 import logging
 import shutil
 import time
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from reep import _store
+from reep import _store, changelog
+from reep._version import __version__
 from reep.config import Settings
 from reep.errors import (
     ChecksumMismatchError,
     ConfigError,
+    NotFoundError,
+    ReplayError,
     UnsupportedReleaseError,
 )
 from reep.release import ReleaseClient, ReleaseManifest, sha256_file, validate_stamp
@@ -38,9 +42,12 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
     from pathlib import Path
 
+    import duckdb
+
     from reep.release import ProgressCallback
 
 __all__ = [
+    "MAX_REPLAY_STEPS",
     "PROFILES",
     "CatalogState",
     "SyncResult",
@@ -56,7 +63,13 @@ logger = logging.getLogger(__name__)
 #: The catalogue profiles.
 PROFILES: tuple[str, ...] = ("slim", "full")
 
+#: The most releases that one sync replays before it downloads a snapshot.
+MAX_REPLAY_STEPS = 30
+
 _TABLE_ROLES = frozenset({"canonical_csv", "overlay"})
+_METHODS = frozenset({"auto", "snapshot", "replay"})
+_SDK_SOURCES = frozenset({"download", "import", "replay"})
+_DERIVED_TABLES = frozenset({"entity_search", "release_metadata"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,13 +217,21 @@ def sync(
     *,
     stamp: str | None = None,
     with_aliases: bool | None = None,
+    method: str = "auto",
     force: bool = False,
     keep_downloads: bool = False,
+    max_replay_steps: int = MAX_REPLAY_STEPS,
     settings: Settings | None = None,
     client: ReleaseClient | None = None,
     progress: Callable[[str, int, int | None], None] | None = None,
 ) -> SyncResult:
     """Bring the local catalogue to a release.
+
+    When a catalogue exists, the sync first tries to replay the changelog chain from
+    the catalogue's release to the target release. The replay downloads the
+    changelogs and the small tables again, and keeps the 158 MB bridges file off
+    the network. When the replay is not possible, the sync downloads a snapshot;
+    ``SyncResult.notes`` says why.
 
     Args:
         profile: ``"slim"`` or ``"full"``. ``None`` keeps the current catalogue's
@@ -218,8 +239,11 @@ def sync(
         stamp: The release to sync to; ``None`` means the current release.
         with_aliases: Add aliases to a slim catalogue. ``None`` keeps the current
             choice.
-        force: Rebuild the catalogue even when it is current.
+        method: ``"auto"`` (replay when possible, else snapshot), ``"snapshot"``
+            or ``"replay"`` (replay or raise ``ReplayError``).
+        force: Rebuild the catalogue from a snapshot even when it is current.
         keep_downloads: Keep the downloaded release files after the build.
+        max_replay_steps: The most releases that one replay walks back.
         settings: The settings; read from the environment when ``None``.
         client: The release client to use.
         progress: Called with ``(file_name, bytes_done, bytes_total)``.
@@ -228,11 +252,18 @@ def sync(
         What the sync did.
 
     Raises:
+        ConfigError: If ``profile`` or ``method`` is not valid.
         NetworkError: If a download fails.
         ChecksumMismatchError: If a file does not match the manifest.
+        ReplayError: If ``method`` is ``"replay"`` and the replay is not possible.
         UnsupportedReleaseError: If the release format is not supported.
     """
     started = time.monotonic()
+    if method not in _METHODS:
+        raise ConfigError(
+            f"Unknown sync method {method!r}.",
+            hint="Use 'auto', 'snapshot' or 'replay'.",
+        )
     settings = settings or Settings.from_env()
     before = state(settings)
     chosen_profile = profile or (before.profile if before else None) or "slim"
@@ -242,6 +273,8 @@ def sync(
         if with_aliases is not None
         else bool(before and "aliases" in before.tables)
     )
+    notes: list[str] = []
+    downloaded = 0
     with _client(client, settings) as rc:
         manifest = rc.manifest(stamp)
         wanted = profile_tables(manifest, chosen_profile, with_aliases=aliases)
@@ -261,7 +294,46 @@ def sync(
                 downloaded_bytes=0,
                 seconds=time.monotonic() - started,
             )
-        downloaded = _snapshot(
+        if method != "snapshot" and not force:
+            blocker = _replay_blocker(before, manifest, chosen_profile, wanted)
+            if blocker is not None and method == "replay":
+                raise ReplayError(f"Cannot replay: {blocker}.")
+            if blocker is None and before is not None:
+                attempt = _Replay(
+                    rc,
+                    manifest,
+                    before,
+                    wanted,
+                    settings=settings,
+                    profile=chosen_profile,
+                    max_steps=max_replay_steps,
+                    progress=progress,
+                )
+                try:
+                    steps = attempt.run()
+                except ReplayError as exc:
+                    downloaded += attempt.downloaded
+                    if method == "replay":
+                        raise
+                    logger.info("Replay not possible (%s); downloading a snapshot", exc)
+                    notes.append(f"snapshot instead of replay: {exc.message}")
+                else:
+                    return SyncResult(
+                        path=settings.catalog_path,
+                        profile=chosen_profile,
+                        method="replay",
+                        stamp_before=before.stamp,
+                        stamp_after=manifest.stamp,
+                        downloaded_bytes=attempt.downloaded,
+                        seconds=time.monotonic() - started,
+                        notes=(f"replayed {steps} changelog(s)",),
+                    )
+                finally:
+                    if not keep_downloads:
+                        attempt.remove_downloads()
+            elif blocker is not None and before is not None:
+                notes.append(f"snapshot: {blocker}")
+        downloaded += _snapshot(
             rc,
             manifest,
             wanted,
@@ -278,7 +350,33 @@ def sync(
         stamp_after=manifest.stamp,
         downloaded_bytes=downloaded,
         seconds=time.monotonic() - started,
+        notes=tuple(notes),
     )
+
+
+def _replay_blocker(
+    before: CatalogState | None,
+    target: ReleaseManifest,
+    profile: str,
+    wanted: list[str],
+) -> str | None:
+    """Return why a replay is not possible, or ``None`` when it is."""
+    if before is None:
+        return "there is no local catalogue"
+    if before.stamp is None:
+        return "the local catalogue has no release stamp"
+    if before.source not in _SDK_SOURCES:
+        return "the local catalogue was not built by the SDK"
+    if before.profile != profile:
+        return "the profile changed"
+    data_tables = set(before.tables) - _DERIVED_TABLES
+    if set(wanted) != data_tables:
+        return "the table set changed"
+    if target.stamp <= before.stamp:
+        return "the target release is not newer than the local catalogue"
+    if target.table_file("bridges") is None:
+        return "the release has no bridges table"
+    return None
 
 
 def import_release(
@@ -454,6 +552,214 @@ def _snapshot(
     return downloaded
 
 
+class _Replay:
+    """One replay of the changelog chain onto the local catalogue."""
+
+    def __init__(
+        self,
+        rc: ReleaseClient,
+        target: ReleaseManifest,
+        before: CatalogState,
+        wanted: list[str],
+        *,
+        settings: Settings,
+        profile: str,
+        max_steps: int,
+        progress: Callable[[str, int, int | None], None] | None,
+    ) -> None:
+        self.rc = rc
+        self.target = target
+        self.before = before
+        self.wanted = wanted
+        self.settings = settings
+        self.profile = profile
+        self.max_steps = max_steps
+        self.progress = progress
+        self.downloaded = 0
+        self._download_dirs: set[Path] = set()
+
+    def run(self) -> int:
+        """Replay the chain and swap the new catalogue in; return the step count."""
+        before_stamp = self.before.stamp
+        if before_stamp is None:  # pragma: no cover - _replay_blocker checks this
+            raise ReplayError("The local catalogue has no release stamp.")
+        dest = self.settings.catalog_path
+        tmp = dest.with_name(f".{dest.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            con = _store.connect(tmp, read_only=False)
+            try:
+                steps = self._build(con, dest, before_stamp)
+                con.execute("CHECKPOINT")
+            finally:
+                con.close()
+            _store.replace_file(tmp, dest)
+        finally:
+            _store.remove_db_files(tmp)
+        return steps
+
+    def remove_downloads(self) -> None:
+        """Remove the files that the replay downloaded."""
+        for directory in self._download_dirs:
+            shutil.rmtree(directory, ignore_errors=True)
+
+    def _build(
+        self, con: duckdb.DuckDBPyConnection, dest: Path, before_stamp: str
+    ) -> int:
+        con.execute(f"SET temp_directory = '{_sql_text(str(dest.parent))}'")
+        con.execute(f"ATTACH '{_sql_text(str(dest))}' AS old (READ_ONLY)")
+        con.execute("CREATE TABLE reep_bridges_work AS SELECT * FROM old.bridges")
+        prior_redirects = {
+            str(src): str(dst)
+            for src, dst in con.execute(
+                "SELECT from_id, to_id FROM old.redirects "
+                "WHERE reason = 'merged' AND coalesce(to_id, '') <> ''"
+            ).fetchall()
+        }
+        con.execute("DETACH old")
+        redirect_steps = self._stage_chain(con, before_stamp)
+        for index in reversed(range(len(redirect_steps))):
+            changelog.apply_staged_bridge_changes(
+                con, "reep_bridges_work", f"reep_step_{index}"
+            )
+        replayed = prior_redirects
+        for events in reversed(redirect_steps):
+            replayed = changelog.replay_redirects(replayed, events)
+        self._reload_tables(con)
+        con.execute(
+            "CREATE TABLE bridges AS SELECT * FROM reep_bridges_work "
+            "ORDER BY provider, namespace, external_id"
+        )
+        con.execute("DROP TABLE reep_bridges_work")
+        self._check(con, replayed)
+        _store.build_entity_search(con)
+        _store.write_metadata(
+            con,
+            {
+                _store.META_STAMP: self.target.stamp,
+                _store.META_SCHEMA: self.target.schema_version,
+                _store.META_TIER: self.target.tier,
+                _store.META_GENERATED_AT: self.target.generated_at,
+                _store.META_SDK_VERSION: __version__,
+                _store.META_STORE_VERSION: _store.STORE_VERSION,
+                _store.META_PROFILE: self.profile,
+                _store.META_SOURCE: "replay",
+                _store.META_BUILT_AT: _store.now_utc(),
+                _store.META_BRIDGE_ATTRS: self.before.bridge_attributes_stamp,
+                _store.META_REPLAYED_FROM: before_stamp,
+                _store.META_REPLAY_STEPS: str(len(redirect_steps)),
+            },
+        )
+        return len(redirect_steps)
+
+    def _stage_chain(
+        self, con: duckdb.DuckDBPyConnection, before_stamp: str
+    ) -> list[list[dict[str, str]]]:
+        """Walk back from the target to the local release; stage each changelog.
+
+        Returns:
+            The redirect events of each changelog, newest first.
+        """
+        bridges = self.target.table_file("bridges")
+        budget = bridges.size if bridges is not None else 0
+        manifest = self.target
+        spent = 0
+        redirect_steps: list[list[dict[str, str]]] = []
+        while True:
+            if len(redirect_steps) >= self.max_steps:
+                raise ReplayError(
+                    f"The local catalogue is more than {self.max_steps} releases "
+                    "behind."
+                )
+            entry = manifest.files.get("changelog.json.gz")
+            if entry is None:
+                raise ReplayError(f"Release {manifest.stamp} has no changelog.")
+            spent += entry.size
+            if spent >= budget:
+                raise ReplayError(
+                    "The changelog chain is larger than the bridges snapshot."
+                )
+            directory = self.settings.downloads_dir / manifest.stamp
+            self._download_dirs.add(directory)
+            path = self.rc.download(
+                entry,
+                directory / entry.name,
+                progress=_named(self.progress, f"{manifest.stamp}/{entry.name}"),
+            )
+            self.downloaded += entry.size
+            log = changelog.Changelog.read(path)
+            if log.stamp != manifest.stamp:
+                raise ReplayError(
+                    f"The changelog of {manifest.stamp} names release {log.stamp}."
+                )
+            if log.prior_stamp is None:
+                raise ReplayError(f"The changelog of {manifest.stamp} has no prior.")
+            changelog.stage_bridge_changes(con, log, f"reep_step_{len(redirect_steps)}")
+            redirect_steps.append(log.redirect_events)
+            if log.prior_stamp == before_stamp:
+                return redirect_steps
+            if log.prior_stamp < before_stamp:
+                raise ReplayError(f"The changelog chain skips release {before_stamp}.")
+            try:
+                manifest = self.rc.manifest(log.prior_stamp)
+            except NotFoundError as exc:
+                raise ReplayError(
+                    f"Release {log.prior_stamp} is no longer on the release bucket."
+                ) from exc
+
+    def _reload_tables(self, con: duckdb.DuckDBPyConnection) -> None:
+        directory = self.settings.downloads_dir / self.target.stamp
+        self._download_dirs.add(directory)
+        for table in self.wanted:
+            if table == "bridges":
+                continue
+            entry = self.target.table_file(table)
+            if entry is None:
+                raise ReplayError(f"Release {self.target.stamp} has no {table} table.")
+            path = self.rc.download(
+                entry,
+                directory / entry.name,
+                progress=_named(self.progress, entry.name),
+            )
+            self.downloaded += entry.size
+            _store.load_table(con, table, path)
+
+    def _check(
+        self, con: duckdb.DuckDBPyConnection, replayed_redirects: dict[str, str]
+    ) -> None:
+        expected_rows = {
+            table: entry.rows
+            for table in self.wanted
+            if (entry := self.target.table_file(table)) is not None
+            and entry.rows is not None
+        }
+        try:
+            _store.check_store(con, expected_rows)
+        except UnsupportedReleaseError as exc:
+            raise ReplayError(
+                f"The replayed catalogue does not match release "
+                f"{self.target.stamp}: {exc.message}"
+            ) from exc
+        actual = {
+            str(src): str(dst)
+            for src, dst in con.execute(
+                "SELECT from_id, to_id FROM redirects "
+                "WHERE reason = 'merged' AND coalesce(to_id, '') <> ''"
+            ).fetchall()
+        }
+        if actual != replayed_redirects:
+            raise ReplayError(
+                "The replayed merge redirects do not match the release's redirects."
+            )
+        orphans = _store.scalar_int(
+            con,
+            "SELECT count(*) FROM bridges b ANTI JOIN entities e USING (reep_id)",
+        )
+        if orphans:
+            raise ReplayError(
+                f"{orphans} replayed bridge(s) name entities that the release lacks."
+            )
+
+
 def _local_tables(source: Path) -> dict[str, Path]:
     found: dict[str, Path] = {}
     for directory in (source, source / "csv"):
@@ -496,3 +802,7 @@ def _client(
         return
     with ReleaseClient(settings.releases_url) as owned:
         yield owned
+
+
+def _sql_text(value: str) -> str:
+    return value.replace("'", "''")

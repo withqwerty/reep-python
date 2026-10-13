@@ -117,7 +117,7 @@ class SyncReport:
         command: ``"sync"`` or ``"review"``.
         apply: Whether the run wrote to the database.
         release_stamp: The release of the local catalogue.
-        database: The database URL with its password hidden.
+        database: The URL location, without credentials or query parameters.
         targets: The counts for each table and target column.
         review_file: The review CSV, when the run wrote one.
         run_log: The run log file, when the run wrote to one.
@@ -361,6 +361,36 @@ def _local_backend(register: Register) -> LocalBackend:
     return backend
 
 
+def _check_bridge_attributes(
+    register: Register, plan_targets: Mapping[str, Sequence[Target]]
+) -> None:
+    """Refuse provider targets when the bridges' ``upstream_status`` is out of date.
+
+    A replayed catalogue keeps each bridge's ``upstream_status`` from the last
+    snapshot, because the changelog does not carry it. A provider fill would then
+    write an ID that the provider has retired since.
+    """
+    if not any(
+        t.provider_column is not None for ts in plan_targets.values() for t in ts
+    ):
+        return
+    release = register.release
+    if (
+        release.stamp
+        and release.bridge_attributes_stamp
+        and release.bridge_attributes_stamp == release.stamp
+    ):
+        return
+    source = release.bridge_attributes_stamp or "an unknown release"
+    raise ConfigError(
+        f"The catalogue is at release {release.stamp}, but its bridge statuses "
+        f"(upstream_status) come from {source}. "
+        "Filling provider ID columns needs current statuses.",
+        hint="Run 'reep catalog sync --method snapshot', then run the sync again. "
+        "A Reep ID fill ('reep sync reep') does not need it.",
+    )
+
+
 def _check_pairs(register: Register, tables: Sequence[TableConfig]) -> None:
     for table in tables:
         for pc in table.provider_ids:
@@ -450,6 +480,7 @@ def _run(
     plan_targets = _plan_targets(chosen, names, strict=strict_targets)
     chosen = [t for t in chosen if plan_targets[t.name]]
     _check_pairs(register, chosen)
+    _check_bridge_attributes(register, plan_targets)
     stamp = register.release.stamp
     if engine is None:
         eng, shown = db.make_engine(config.database_url())
@@ -457,10 +488,24 @@ def _run(
     else:
         eng, shown, own_engine = engine, db.masked_url(engine.url), False
     writer = _ReviewWriter(review_file, stamp) if review_file is not None else None
-    tallies: list[tuple[TableHandle, Planner, list[_Tally]]] = []
+    tallies: list[
+        tuple[TableHandle, Planner, list[_Tally], dict[Any, dict[str, Any]]]
+    ] = []
     done = False
     try:
         handles = [db.reflect(eng, t, shown) for t in chosen]
+        physical: set[tuple[str | None, str]] = set()
+        for handle in handles:
+            key = (
+                handle.table.schema or eng.dialect.default_schema_name,
+                handle.table.name,
+            )
+            if key in physical:
+                raise ConfigError(
+                    "Two chosen table entries name the same physical table.",
+                    hint="Use one entry with all target columns for each table.",
+                )
+            physical.add(key)
         for handle in handles:
             planner = Planner(
                 handle.config,
@@ -481,6 +526,9 @@ def _run(
                 for t in planner.targets
             ]
             rows_read = 0
+            # The values each row with a write held when read: the write guards.
+            guards: dict[Any, dict[str, Any]] = {}
+            watched = [c for c in planner.columns if c not in handle.config.primary_key]
             for rows in db.read_rows(
                 eng,
                 handle,
@@ -489,6 +537,7 @@ def _run(
                 shown=shown,
             ):
                 rows_read += len(rows)
+                by_pk = {row.pk: row for row in rows}
                 for plan in _plan_partition(planner, rows, register, backend):
                     tally = per_target[planner.targets.index(plan.target)]
                     tally.outcomes[plan.outcome] += 1
@@ -496,6 +545,9 @@ def _run(
                         tally.writes.append(plan.write)
                     if plan.status_write is not None:
                         tally.status_writes.append(plan.status_write)
+                    if (plan.write or plan.status_write) and plan.pk not in guards:
+                        cells = by_pk[plan.pk].cells
+                        guards[plan.pk] = {c: cells[c].raw for c in watched}
                     if writer is not None and plan.outcome in REVIEW_OUTCOMES:
                         writer.write(handle.config, plan)
             for tally in per_target:
@@ -511,7 +563,7 @@ def _run(
                     planned=len(tally.writes),
                     status_planned=len(tally.status_writes),
                 )
-            tallies.append((handle, planner, per_target))
+            tallies.append((handle, planner, per_target, guards))
         reports = _write(db, eng, tallies, apply=apply, shown=shown)
         done = True
     finally:
@@ -562,6 +614,23 @@ def _plan_partition(
             }
         )
         bridges[target.name] = backend.bridges_many(need, pc.provider, pc.namespace)
+    # Resolve every provider ID the plan may write, so the planner can check that
+    # it leads back to the row's entity.
+    proposed = sorted(
+        {
+            b.provider_id
+            for by_id in bridges.values()
+            for found in by_id.values()
+            for b in found
+            if b.upstream_status is None and b.provider_id not in resolutions
+        },
+        key=lambda p: (p.provider, p.namespace, p.external_id),
+    )
+    if proposed:
+        resolutions = {
+            **resolutions,
+            **dict(zip(proposed, register.resolve_many(proposed), strict=True)),
+        }
     return [
         plan
         for row, ident in zip(rows, identities, strict=True)
@@ -572,36 +641,46 @@ def _plan_partition(
 def _write(
     db: Any,
     engine: sa.Engine,
-    tallies: Sequence[tuple[TableHandle, Planner, list[_Tally]]],
+    tallies: Sequence[
+        tuple[TableHandle, Planner, list[_Tally], dict[Any, dict[str, Any]]]
+    ],
     *,
     apply: bool,
     shown: str,
 ) -> list[TargetReport]:
-    groups: list[tuple[TableHandle, str, bool, Sequence[Write]]] = []
-    slots: list[tuple[_Tally, str]] = []
+    groups: list[tuple[TableHandle, list[Any]]] = []
+    owners: list[dict[str, tuple[_Tally, str]]] = []
     if apply:
-        for handle, _planner, per_target in tallies:
+        for handle, _planner, per_target, guards in tallies:
+            values: dict[Any, dict[str, Any]] = {}
+            owner: dict[str, tuple[_Tally, str]] = {}
             for tally in per_target:
-                fills = [w for w in tally.writes if w.old is None]
-                replaces = [w for w in tally.writes if w.old is not None]
-                for null_guard, writes in ((True, fills), (False, replaces)):
-                    if writes:
-                        groups.append((handle, tally.report.column, null_guard, writes))
-                        slots.append((tally, "written"))
-                status_column = handle.config.status
-                if status_column is not None:
-                    nulls = [w for w in tally.status_writes if w.old is None]
-                    others = [w for w in tally.status_writes if w.old is not None]
-                    for null_guard, writes in ((True, nulls), (False, others)):
-                        if writes:
-                            groups.append((handle, status_column, null_guard, writes))
-                            slots.append((tally, "status_written"))
+                for kind, writes in (
+                    ("written", tally.writes),
+                    ("status_written", tally.status_writes),
+                ):
+                    for w in writes:
+                        values.setdefault(w.pk, {})[w.column] = w.value
+                        owner[w.column] = (tally, kind)
+            if values:
+                groups.append(
+                    (
+                        handle,
+                        [
+                            db.RowUpdate(pk=pk, values=cells, guard=guards[pk])
+                            for pk, cells in values.items()
+                        ],
+                    )
+                )
+                owners.append(owner)
     counts = db.apply_writes(engine, groups, shown=shown) if groups else []
     written: dict[int, Counter[str]] = {}
-    for (tally, kind), count in zip(slots, counts, strict=True):
-        written.setdefault(id(tally), Counter())[kind] += count
+    for owner, by_column in zip(owners, counts, strict=True):
+        for column, count in by_column.items():
+            tally, kind = owner[column]
+            written.setdefault(id(tally), Counter())[kind] += count
     reports: list[TargetReport] = []
-    for _handle, _planner, per_target in tallies:
+    for _handle, _planner, per_target, _guards in tallies:
         for tally in per_target:
             got = written.get(id(tally), Counter())
             r = tally.report

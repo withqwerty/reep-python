@@ -11,6 +11,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from reep import _store
+from reep.backends.base import resolution_from_states
 from reep.errors import CatalogMissingError, UnsupportedReleaseError
 from reep.models import (
     ENTITY_TYPE_BY_LETTER,
@@ -24,7 +25,6 @@ from reep.models import (
     ProviderNamespace,
     ReleaseInfo,
     Resolution,
-    ResolutionStatus,
 )
 
 if TYPE_CHECKING:
@@ -38,6 +38,8 @@ __all__ = ["LocalBackend"]
 logger = logging.getLogger(__name__)
 
 _MAX_REDIRECT_HOPS = 8
+# Entity statuses that end a redirect chain; any other status has no current ID.
+_LIVE = frozenset({"active", "retired"})
 
 _BRIDGES_FOR_TRIPLES = """
 WITH q AS (
@@ -60,6 +62,14 @@ FROM q
 JOIN bridges b ON b.reep_id = q.reep_id
 WHERE b.provider = $provider AND ($namespace IS NULL OR b.namespace = $namespace)
 ORDER BY b.reep_id, b.namespace, b.external_id
+"""
+
+_MERGED_INTO = """
+WITH q AS (SELECT DISTINCT unnest($ids) AS reep_id)
+SELECT r.from_id, r.to_id
+FROM q
+JOIN redirects r ON r.to_id = q.reep_id
+WHERE r.reason = 'merged'
 """
 
 _STATES = """
@@ -218,7 +228,7 @@ class LocalBackend:
         )
         stamp = self.stamp
         return [
-            _resolution(pid, matches.get(i, []), states, stamp)
+            resolution_from_states(pid, matches.get(i, []), states, stamp)
             for i, pid in enumerate(pids)
         ]
 
@@ -245,21 +255,14 @@ class LocalBackend:
         for external_id, reep_id in rows:
             by_id.setdefault(str(external_id), set()).add(str(reep_id))
         states = self._states({rid for rids in by_id.values() for rid in rids})
+        stamp = self.stamp
         out: list[tuple[str | None, str]] = []
         for external_id in external_ids:
-            rids = by_id.get(external_id)
-            if not rids:
-                out.append((None, ResolutionStatus.NOT_FOUND.value))
-                continue
-            current = {_current_or_none(states[rid]) for rid in rids}
-            if len(rids) > 1 and len(current) > 1:
-                out.append((None, ResolutionStatus.AMBIGUOUS.value))
-                continue
-            state = states[next(iter(rids))]
-            if state.status is IdStatus.WITHDRAWN:
-                out.append((None, ResolutionStatus.WITHDRAWN.value))
-            else:
-                out.append((state.current_id, ResolutionStatus.FOUND.value))
+            found = [(rid, None, None) for rid in sorted(by_id.get(external_id, ()))]
+            result = resolution_from_states(
+                ProviderId(provider, namespace, external_id), found, states, stamp
+            )
+            out.append((result.reep_id, result.status.value))
         return out
 
     def bridges_many(
@@ -267,11 +270,11 @@ class LocalBackend:
     ) -> dict[str, list[Bridge]]:
         """Return the bridges of many entities at one provider.
 
-        Only bridges that name the given IDs are returned: the bridges of an ID
-        that merged into another stay with that ID.
+        The bridges of an entity include the bridges that still name an ID merged
+        into it; such a bridge's ``reep_id`` is the merged ID.
 
         Args:
-            reep_ids: Valid Reep IDs.
+            reep_ids: Valid Reep IDs of active or retired entities.
             provider: The provider slug.
             namespace: Return only this namespace; ``None`` for all.
 
@@ -281,12 +284,14 @@ class LocalBackend:
         out: dict[str, list[Bridge]] = {}
         if not reep_ids:
             return out
+        owner = {rid: rid for rid in reep_ids}
+        owner.update(self._merged_into(reep_ids))
         rows = self._query(
             _BRIDGES_FOR_IDS,
-            {"ids": list(reep_ids), "provider": provider, "namespace": namespace},
+            {"ids": sorted(owner), "provider": provider, "namespace": namespace},
         )
         for rid, prov, ns, external_id, rung, upstream in rows:
-            out.setdefault(str(rid), []).append(
+            out.setdefault(owner[str(rid)], []).append(
                 Bridge(
                     provider_id=ProviderId(str(prov), str(ns), str(external_id)),
                     reep_id=str(rid),
@@ -294,7 +299,32 @@ class LocalBackend:
                     upstream_status=upstream,
                 )
             )
-        return out
+        return {owner: _unique_bridges(found, owner) for owner, found in out.items()}
+
+    def _merged_into(self, survivors: Sequence[str]) -> dict[str, str]:
+        """Return each ID whose merge chain ends at one of ``survivors``.
+
+        Args:
+            survivors: Reep IDs of active or retired entities.
+
+        Returns:
+            ``{merged ID: survivor}``.
+        """
+        owner: dict[str, str] = {}
+        done = set(survivors)
+        frontier = {rid: rid for rid in survivors}
+        for _ in range(_MAX_REDIRECT_HOPS):
+            if not frontier:
+                break
+            following: dict[str, str] = {}
+            for src, dst in self._query(_MERGED_INTO, {"ids": sorted(frontier)}):
+                src = str(src)
+                if src in done:
+                    continue
+                done.add(src)
+                owner[src] = following[src] = frontier[str(dst)]
+            frontier = following
+        return owner
 
     def current_many(self, reep_ids: Sequence[str]) -> list[IdState]:
         """Return the state of stored Reep IDs, in the order given.
@@ -326,6 +356,9 @@ class LocalBackend:
             and state.current_id
         ):
             target = state.current_id
+        sources = [target]
+        if target_state(state, target) in _LIVE:
+            sources.extend(self._merged_into([target]))
         rows = self._query(
             "SELECT reep_id, entity_type, status, nullif(label, ''), "
             "nullif(gender, ''), nullif(country, ''), "
@@ -339,17 +372,19 @@ class LocalBackend:
         bridges = tuple(
             Bridge(
                 provider_id=ProviderId(str(p), str(n), str(x)),
-                reep_id=target,
+                reep_id=str(owner),
                 rung=rung,
                 upstream_status=upstream,
             )
-            for p, n, x, rung, upstream in self._query(
-                "SELECT provider, namespace, external_id, nullif(rung, ''), "
-                "nullif(upstream_status, '') FROM bridges WHERE reep_id = $id "
-                "ORDER BY provider, namespace, external_id",
-                {"id": target},
+            for owner, p, n, x, rung, upstream in self._query(
+                "SELECT reep_id, provider, namespace, external_id, nullif(rung, ''), "
+                "nullif(upstream_status, '') FROM bridges "
+                "WHERE reep_id IN (SELECT unnest($ids)) "
+                "ORDER BY provider, namespace, external_id, reep_id",
+                {"ids": sources},
             )
         )
+        bridges = tuple(_unique_bridges(list(bridges), target))
         aliases: tuple[str, ...] = ()
         if "aliases" in self._tables:
             aliases = tuple(
@@ -494,11 +529,14 @@ class LocalBackend:
                 c_type, c_status, c_label, c_to, c_reason = raw.get(
                     current, (None, None, None, None, None)
                 )
-                if c_reason == "merged" and c_to and c_to not in seen:
+                if c_reason == "merged" and c_to:
+                    if current in seen or c_to in seen:
+                        break  # a loop: no ID in it is current
                     seen.add(current)
                     current = c_to
                     continue
-                if c_reason in WITHDRAWN_REASONS or c_status is None:
+                if c_reason in WITHDRAWN_REASONS or c_status not in _LIVE:
+                    # Withdrawn, unpublished, or redirected with no survivor.
                     return IdState(
                         reep_id=rid,
                         status=IdStatus.WITHDRAWN,
@@ -572,62 +610,26 @@ class LocalBackend:
             cursor.close()
 
 
-def _current_or_none(state: IdState) -> str | None:
-    return state.current_id
+def _unique_bridges(found: list[Bridge], owner: str) -> list[Bridge]:
+    """Return one bridge per provider ID, the entity's own bridge first, sorted.
 
-
-def _resolution(
-    pid: ProviderId,
-    found: list[tuple[str, str | None, str | None]],
-    states: dict[str, IdState],
-    stamp: str | None,
-) -> Resolution:
-    if not found:
-        return Resolution(
-            query=pid, status=ResolutionStatus.NOT_FOUND, release_stamp=stamp
-        )
-    if len({rid for rid, _, _ in found}) > 1:
-        candidates = tuple(
-            sorted({states[rid].current_id or rid for rid, _, _ in found})
-        )
-        if len(candidates) > 1:
-            return Resolution(
-                query=pid,
-                status=ResolutionStatus.AMBIGUOUS,
-                candidates=candidates,
-                release_stamp=stamp,
-            )
-    rid, rung, upstream = found[0]
-    bridge = Bridge(provider_id=pid, reep_id=rid, rung=rung, upstream_status=upstream)
-    state = states[rid]
-    if state.status is IdStatus.WITHDRAWN:
-        return Resolution(
-            query=pid,
-            status=ResolutionStatus.WITHDRAWN,
-            bridge=bridge,
-            withdrawn_reason=state.reason,
-            entity_type=state.entity_type,
-            release_stamp=stamp,
-        )
-    if state.status is IdStatus.REDIRECTED:
-        return Resolution(
-            query=pid,
-            status=ResolutionStatus.FOUND,
-            reep_id=state.current_id,
-            entity_type=state.entity_type,
-            label=state.label,
-            entity_status=state.current_status,
-            bridge=bridge,
-            redirected_from=rid,
-            release_stamp=stamp,
-        )
-    return Resolution(
-        query=pid,
-        status=ResolutionStatus.FOUND,
-        reep_id=rid,
-        entity_type=state.entity_type,
-        label=state.label,
-        entity_status=state.current_status,
-        bridge=bridge,
-        release_stamp=stamp,
+    The same provider ID can be on an entity and on an ID merged into it.
+    """
+    chosen: dict[ProviderId, Bridge] = {}
+    for b in sorted(found, key=lambda b: b.reep_id != owner):
+        chosen.setdefault(b.provider_id, b)
+    return sorted(
+        chosen.values(),
+        key=lambda b: (
+            b.provider_id.provider,
+            b.provider_id.namespace,
+            b.provider_id.external_id,
+        ),
     )
+
+
+def target_state(state: IdState, target: str) -> str | None:
+    """Return the entity status of ``target``, the ID that ``entity`` reads."""
+    if state.current_id == target:
+        return state.current_status
+    return None

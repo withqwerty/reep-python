@@ -97,10 +97,10 @@ def test_run_log_false() -> None:
         ({"version": 2, "tables": {}}, "version must be 1"),
         ({"version": 1, "tables": {}}, "has no entries"),
         ({"version": 1, "tables": []}, "tables must be a mapping"),
-        ({**_config(), "extra": 1}, "unknown key 'extra'"),
+        ({**_config(), "extra": 1}, "unknown key"),
         ({**_config(), "database": 5}, "database must be a URL"),
         ({**_config(), "run_log": 3}, "run_log must be"),
-        (_config(colour="red"), "unknown key 'colour'"),
+        (_config(colour="red"), "unknown key"),
         (_config(table=None), "table is required"),
         (_config(entity_type="manager"), "entity_type must be one of"),
         (_config(primary_key=None), "primary_key is required"),
@@ -108,13 +108,16 @@ def test_run_log_false() -> None:
         (_config(primary_key=True), "must be a column or table name"),
         (_config(reep_id=None, provider_ids=None), "needs reep_id, provider_ids"),
         (_config(reep_id=None, status="s"), "status needs reep_id"),
-        (_config(provider_ids={"transfermarkt": "tm_id"}), "is not provider/namespace"),
+        (
+            _config(provider_ids={"transfermarkt": "tm_id"}),
+            "each key must be provider/namespace",
+        ),
         (
             _config(provider_ids={"a/b": "x", "c/d": "x"}),
             "names a column more than once",
         ),
-        (_config(reep_id="id"), "more than one role"),
-        (_config(status="tm_id"), "more than one role"),
+        (_config(reep_id="id"), "must not have another role"),
+        (_config(status="tm_id"), "must not have another role"),
         (_config(status="reep_id"), "must be different columns"),
         (_config(provider_ids={"a/b": None}), "is required"),
         (_config(provider_ids=["a/b"]), "must be a mapping"),
@@ -190,3 +193,33 @@ def test_missing_dependency_is_a_config_error(monkeypatch: pytest.MonkeyPatch) -
     with pytest.raises(ConfigError, match="needs the 'sqlalchemy' package") as info:
         require("sqlalchemy")
     assert "reep[db]" in (info.value.hint or "")
+
+
+def test_a_yaml_error_does_not_print_the_source_line(tmp_path: Path) -> None:
+    # PyYAML quotes the line it could not parse; that line can hold a password.
+    path = tmp_path / "reep.yml"
+    path.write_text('version: 1\ndatabase: "postgresql://u:s3cr@db/x\ntables: {}\n')
+    with pytest.raises(ConfigError) as info:
+        load_config(path)
+    assert "s3cr" not in str(info.value)
+    assert "line" in info.value.message
+
+
+def test_a_yaml_tag_error_does_not_echo_the_url(tmp_path: Path) -> None:
+    # PyYAML puts an unknown tag, here the whole URL, into its message.
+    path = tmp_path / "reep.yml"
+    path.write_text("version: 1\ndatabase: !postgresql://u:s3cr@db/x\n")
+    with pytest.raises(ConfigError) as info:
+        load_config(path)
+    assert "s3cr" not in str(info.value)
+    assert "line 2" in info.value.message
+
+
+def test_a_config_error_does_not_quote_a_url_password(tmp_path: Path) -> None:
+    # A URL in the wrong place is quoted by the validation message.
+    path = tmp_path / "reep.yml"
+    path.write_text('version: {database: "postgresql://u:s3cr@db/x"}\ntables: {}\n')
+    with pytest.raises(ConfigError) as info:
+        load_config(path)
+    assert "s3cr" not in str(info.value)
+    assert "postgresql://" not in str(info.value)

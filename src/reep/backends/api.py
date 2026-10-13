@@ -6,8 +6,11 @@ The API needs a key. Every lookup costs one credit per item; ``/meta``,
 Differences from the local backend:
 
 * bridges carry no ``rung`` or ``upstream_status``;
+* an entity lists only the bridges that name its own ID, not the bridges that still
+  name an ID merged into it;
 * a withdrawn ID that the release removed (``de_corroborated``, ``withheld``) reads
-  as ``UNKNOWN``, and withdrawn states carry no reason;
+  as ``UNKNOWN``, and a withdrawn state carries a reason only for a redirect chain
+  without a current ID (``redirect_loop``, ``target_not_published``);
 * search returns at most 20 results and no entity status;
 * ``providers`` reports no namespaces.
 """
@@ -21,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from reep._version import USER_AGENT
+from reep.backends.base import resolution_from_states
 from reep.config import DEFAULT_API_URL
 from reep.errors import (
     ApiError,
@@ -44,7 +48,6 @@ from reep.models import (
     ProviderNamespace,
     ReleaseInfo,
     Resolution,
-    ResolutionStatus,
 )
 
 if TYPE_CHECKING:
@@ -62,6 +65,10 @@ MAX_ENTITY_BATCH = 100
 MAX_SEARCH_RESULTS = 20
 
 _RETRY_STATUSES = frozenset({429, 502, 503, 504})
+# The API follows one redirect per request; the backend follows the rest.
+_MAX_REDIRECT_HOPS = 8
+# Entity states that end a redirect chain; any other state has no current ID.
+_LIVE = frozenset({"active", "retired"})
 _ARGUMENT_ERRORS = frozenset(
     {
         "invalid_search_query",
@@ -236,29 +243,27 @@ class ApiBackend:
                 ]
             )
             for status, body in items:
-                if status in (200, 409):
+                if status == 200 or (
+                    status == 409 and body.get("error") == "ambiguous_provider_id"
+                ):
                     found.append(_bridge_candidates(body))
                 else:
                     raise _error_from(status, body)
-        survivors = {
-            str(env["canonical_reep_id"])
-            for candidates in found
-            if len(candidates) == 1
-            for env in candidates
-            if env.get("lifecycle_state") == "redirected"
-            and env.get("canonical_reep_id")
-        }
-        survivor_states = (
-            dict(
-                zip(
-                    sorted(survivors), self.current_many(sorted(survivors)), strict=True
-                )
-            )
-            if survivors
-            else {}
+        # Follow each merged candidate from its own ID, so the chain has the same
+        # length limit as in the local backend.
+        merged = sorted(
+            {
+                str(env.get("reep_id"))
+                for candidates in found
+                for env in candidates
+                if env.get("lifecycle_state") == "redirected"
+            }
+        )
+        merged_states = (
+            dict(zip(merged, self.current_many(merged), strict=True)) if merged else {}
         )
         return [
-            self._resolution(pid, candidates, survivor_states)
+            self._resolution(pid, candidates, merged_states)
             for pid, candidates in zip(pids, found, strict=True)
         ]
 
@@ -289,13 +294,37 @@ class ApiBackend:
         Returns:
             One state per ID, in the order given.
         """
-        out: list[IdState] = []
-        for start in range(0, len(reep_ids), MAX_ENTITY_BATCH):
-            chunk = reep_ids[start : start + MAX_ENTITY_BATCH]
-            items = self._batch([{"type": "entity", "id": rid} for rid in chunk])
-            for rid, (status, body) in zip(chunk, items, strict=True):
-                out.append(self._state(rid, status, body))
-        return out
+        responses = self._entity_responses(reep_ids)
+        return [self._state(rid, responses) for rid in reep_ids]
+
+    def _entity_responses(
+        self, reep_ids: Sequence[str]
+    ) -> dict[str, tuple[int, dict[str, Any]]]:
+        """Fetch entity items, and the items of each redirect target that merged.
+
+        The API answers a merged ID with its target's entity, one step only. When
+        that target merged too, the backend asks for it as well, up to
+        ``_MAX_REDIRECT_HOPS`` steps.
+        """
+        responses: dict[str, tuple[int, dict[str, Any]]] = {}
+        pending = list(dict.fromkeys(reep_ids))
+        for _ in range(_MAX_REDIRECT_HOPS + 1):
+            if not pending:
+                break
+            for start in range(0, len(pending), MAX_ENTITY_BATCH):
+                chunk = pending[start : start + MAX_ENTITY_BATCH]
+                items = self._batch([{"type": "entity", "id": rid} for rid in chunk])
+                responses.update(zip(chunk, items, strict=True))
+            following: list[str] = []
+            for rid in pending:
+                status, body = responses[rid]
+                target = body.get("redirected_to") if status == 200 else None
+                if target and body.get("lifecycle_state") == "redirected":
+                    nxt = str(target)
+                    if nxt not in responses and nxt not in following:
+                        following.append(nxt)
+            pending = following
+        return responses
 
     def entity(self, reep_id: str, *, follow_redirects: bool = True) -> Entity | None:
         """Return an entity with its bridges and aliases (``GET /entities/{id}``).
@@ -307,22 +336,30 @@ class ApiBackend:
         Returns:
             The entity, or ``None`` if the API does not have it.
         """
+        survivor: str | None = None
+        if follow_redirects:
+            state = self.current_many([reep_id])[0]
+            if state.status is IdStatus.UNKNOWN:
+                return None
+            if state.status is IdStatus.REDIRECTED and state.current_id:
+                survivor = state.current_id
         response = self._request(
             "GET",
-            f"/entities/{reep_id}",
+            f"/entities/{survivor or reep_id}",
             params={"include": "aliases,bridges"},
         )
         if response.status_code == 404:
             return None
         body = self._json(response)
-        redirected_to = body.get("redirected_to")
-        if redirected_to and not follow_redirects:
+        if survivor is None and body.get("redirected_to"):
+            # Not followed, or a chain with no current ID (a loop or no survivor).
             return Entity(
                 reep_id=reep_id,
                 entity_type=ENTITY_TYPE_BY_LETTER[reep_id[1]],
                 status="redirected",
                 release_stamp=self.release_stamp,
             )
+        redirected_to = survivor
         target = str(body.get("reep_id"))
         bridges = sorted(
             (
@@ -402,68 +439,65 @@ class ApiBackend:
         self,
         pid: ProviderId,
         candidates: list[dict[str, Any]],
-        survivor_states: dict[str, IdState],
+        merged_states: dict[str, IdState],
     ) -> Resolution:
+        found: list[tuple[str, str | None, str | None]] = []
+        states: dict[str, IdState] = {}
+        for env in candidates:
+            rid = str(env.get("reep_id"))
+            if rid in states:
+                continue
+            states[rid] = self._candidate_state(rid, env, merged_states)
+            found.append((rid, None, None))
+        return resolution_from_states(pid, found, states, self.release_stamp)
+
+    def _candidate_state(
+        self, rid: str, env: dict[str, Any], merged_states: dict[str, IdState]
+    ) -> IdState:
+        """Return the state of a resolve candidate, after its redirects."""
         stamp = self.release_stamp
-        if not candidates:
-            return Resolution(
-                query=pid, status=ResolutionStatus.NOT_FOUND, release_stamp=stamp
-            )
-        ids = {str(env.get("reep_id")) for env in candidates}
-        if len(ids) > 1:
-            current = sorted(
-                {
-                    str(env.get("canonical_reep_id") or env.get("reep_id"))
-                    for env in candidates
-                }
-            )
-            if len(current) > 1:
-                return Resolution(
-                    query=pid,
-                    status=ResolutionStatus.AMBIGUOUS,
-                    candidates=tuple(current),
-                    release_stamp=stamp,
-                )
-        env = candidates[0]
-        rid = str(env.get("reep_id"))
-        bridge = Bridge(provider_id=pid, reep_id=rid)
         lifecycle = env.get("lifecycle_state")
-        if lifecycle == "redirected":
-            survivor = env.get("canonical_reep_id")
-            state = survivor_states.get(str(survivor)) if survivor else None
-            if survivor and survivor != rid and state is not None and state.current_id:
-                return Resolution(
-                    query=pid,
-                    status=ResolutionStatus.FOUND,
-                    reep_id=state.current_id,
-                    entity_type=state.entity_type,
-                    label=state.label,
-                    entity_status=state.current_status,
-                    bridge=bridge,
-                    redirected_from=rid,
+        etype = env.get("entity_type") or ENTITY_TYPE_BY_LETTER.get(rid[1])
+        if lifecycle != "redirected":
+            if not isinstance(lifecycle, str) or lifecycle not in _LIVE:
+                return IdState(
+                    reep_id=rid,
+                    status=IdStatus.WITHDRAWN,
+                    reason=env.get("reason") or "target_not_published",
+                    entity_type=etype,
                     release_stamp=stamp,
                 )
-            return Resolution(
-                query=pid,
-                status=ResolutionStatus.WITHDRAWN,
-                bridge=bridge,
-                entity_type=env.get("entity_type"),
+            return IdState(
+                reep_id=rid,
+                status=IdStatus.RETIRED if lifecycle == "retired" else IdStatus.ACTIVE,
+                current_id=rid,
+                current_status=str(lifecycle) if lifecycle else None,
+                entity_type=etype,
+                label=env.get("name_en") or None,
                 release_stamp=stamp,
             )
-        return Resolution(
-            query=pid,
-            status=ResolutionStatus.FOUND,
+        state = merged_states.get(rid)
+        if state is not None and state.status is IdStatus.REDIRECTED:
+            return state
+        reason = state.reason if state is not None else None
+        if state is None or state.status is IdStatus.UNKNOWN:
+            # The resolve index names the ID, but the API has no entity for its
+            # target: the release does not publish it.
+            reason = "target_not_published"
+        return IdState(
             reep_id=rid,
-            entity_type=env.get("entity_type"),
-            label=env.get("name_en") or None,
-            entity_status=str(lifecycle) if lifecycle else None,
-            bridge=bridge,
+            status=IdStatus.WITHDRAWN,
+            reason=reason,
+            entity_type=etype,
             release_stamp=stamp,
         )
 
-    def _state(self, rid: str, status: int, body: dict[str, Any]) -> IdState:
+    def _state(
+        self, rid: str, responses: dict[str, tuple[int, dict[str, Any]]]
+    ) -> IdState:
         stamp = self.release_stamp
         etype = ENTITY_TYPE_BY_LETTER.get(rid[1])
+        status, body = responses[rid]
         if status == 404:
             return IdState(
                 reep_id=rid,
@@ -473,35 +507,65 @@ class ApiBackend:
             )
         if status != 200:
             raise _error_from(status, body)
-        lifecycle = body.get("lifecycle_state")
-        label = body.get("name_en") or None
         redirected_to = body.get("redirected_to")
-        if redirected_to:
+        if not redirected_to:
+            lifecycle = body.get("lifecycle_state")
+            if not isinstance(lifecycle, str) or lifecycle not in _LIVE:
+                # Only active or retired entities can end a resolution.
+                return IdState(
+                    reep_id=rid,
+                    status=IdStatus.WITHDRAWN,
+                    reason=body.get("reason") or "target_not_published",
+                    entity_type=body.get("entity_type") or etype,
+                    label=body.get("name_en") or None,
+                    release_stamp=stamp,
+                )
             return IdState(
                 reep_id=rid,
-                status=IdStatus.REDIRECTED,
-                current_id=str(redirected_to),
+                status=IdStatus.RETIRED if lifecycle == "retired" else IdStatus.ACTIVE,
+                current_id=rid,
                 current_status=str(lifecycle) if lifecycle else None,
-                reason="merged",
                 entity_type=body.get("entity_type") or etype,
-                label=label,
+                label=body.get("name_en") or None,
                 release_stamp=stamp,
             )
-        if lifecycle == "redirected":
-            return IdState(
-                reep_id=rid,
-                status=IdStatus.WITHDRAWN,
-                entity_type=body.get("entity_type") or etype,
-                label=label,
-                release_stamp=stamp,
-            )
+        # ``body`` is the entity of ``current``; walk on while it merged too.
+        seen = {rid}
+        current = str(redirected_to)
+        reason = "redirect_loop"
+        for _ in range(_MAX_REDIRECT_HOPS):
+            lifecycle = body.get("lifecycle_state")
+            if isinstance(lifecycle, str) and lifecycle in _LIVE:
+                return IdState(
+                    reep_id=rid,
+                    status=IdStatus.REDIRECTED,
+                    current_id=current,
+                    current_status=str(lifecycle),
+                    reason="merged",
+                    entity_type=body.get("entity_type") or etype,
+                    label=body.get("name_en") or None,
+                    release_stamp=stamp,
+                )
+            if lifecycle != "redirected" or current in seen:
+                reason = "redirect_loop" if current in seen else "target_not_published"
+                break
+            seen.add(current)
+            step = responses.get(current)
+            if step is None:
+                break  # longer than _MAX_REDIRECT_HOPS
+            step_status, step_body = step
+            if step_status not in (200, 404):
+                raise _error_from(step_status, step_body)
+            nxt = step_body.get("redirected_to") if step_status == 200 else None
+            if not nxt:
+                reason = "target_not_published"
+                break
+            current, body = str(nxt), step_body
         return IdState(
             reep_id=rid,
-            status=IdStatus.RETIRED if lifecycle == "retired" else IdStatus.ACTIVE,
-            current_id=rid,
-            current_status=str(lifecycle) if lifecycle else None,
-            entity_type=body.get("entity_type") or etype,
-            label=label,
+            status=IdStatus.WITHDRAWN,
+            reason=reason,
+            entity_type=etype,
             release_stamp=stamp,
         )
 

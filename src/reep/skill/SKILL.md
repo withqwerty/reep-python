@@ -63,8 +63,9 @@ reep resolve transfermarkt spieler 568177 --json
 
 Translate an ID to another provider. The IDs are in `data.targets[].external_id`;
 live IDs come first, and `upstream_status` is `retired` or `removed` when the
-provider no longer uses an ID. `data.resolution` holds the source's Reep ID, status
-and label, so a separate `resolve` is not needed:
+provider no longer uses an ID. A target whose `reep_id` differs from the source's
+Reep ID came through an ID that merged into it. `data.resolution` holds the source's
+Reep ID, status and label, so a separate `resolve` is not needed:
 
 ```bash
 reep translate transfermarkt/spieler/568177 --to fbref --json

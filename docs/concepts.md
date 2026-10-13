@@ -70,6 +70,11 @@ Each bridge (provider ID to Reep ID) carries two columns from the local catalogu
   in favour of another one it holds, `removed` when the provider's newest complete
   registry no longer lists it. The ID still resolves.
 
+A bridge can still name an ID that merged into another. Lookups of the provider ID
+give the survivor (`redirected_from` names the merged ID). The survivor's entity,
+`translate` and the database sync list such a bridge with the survivor's own
+bridges; its `reep_id` is the merged ID, which shows where it came from.
+
 ## Releases
 
 The register is published as dated releases, for example `20261005T180536Z`. Each
@@ -94,4 +99,6 @@ again (the changelog does not carry all their columns). It checks the result
 against the release and downloads a full snapshot when it cannot replay.
 
 Bridges added by a replay have no `rung` or `upstream_status` until the next full
-snapshot. `reep status` shows the release that these two columns come from.
+snapshot, and the bridges that were already there keep the values of that
+snapshot. `reep status` shows the release that these two columns come from. The
+database sync refuses to fill provider ID columns from such a catalogue.

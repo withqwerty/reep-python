@@ -268,8 +268,22 @@ def load_config(path: str | Path) -> Config:
     try:
         data = yaml.safe_load(file.read_text(encoding="utf-8"))
     except yaml.YAMLError as exc:
-        raise ConfigError(f"{file} is not valid YAML: {exc}") from exc
+        # str(exc) quotes the source line, which can hold a database password.
+        raise ConfigError(f"{file} is not valid YAML: {_yaml_problem(exc)}") from None
     return parse_config(data, path=file)
+
+
+def _yaml_problem(exc: Exception) -> str:
+    """Return a YAML error's kind and position, without any text from the file.
+
+    PyYAML's messages quote the file: the source line, and in ``problem`` a tag or
+    token. Either can hold a database password.
+    """
+    mark = getattr(exc, "problem_mark", None) or getattr(exc, "context_mark", None)
+    kind = type(exc).__name__
+    if mark is not None:
+        return f"{kind} at line {mark.line + 1}, column {mark.column + 1}"
+    return kind
 
 
 def parse_config(data: object, *, path: Path | None = None) -> Config:
@@ -291,7 +305,7 @@ def parse_config(data: object, *, path: Path | None = None) -> Config:
     version = top.get("version")
     if version != CONFIG_VERSION:
         raise ConfigError(
-            f"{where}: version must be {CONFIG_VERSION}, not {version!r}.",
+            f"{where}: version must be {CONFIG_VERSION}.",
             hint="Add 'version: 1' at the top of the file.",
         )
     database = top.get("database")
@@ -312,8 +326,8 @@ def parse_config(data: object, *, path: Path | None = None) -> Config:
     if not tables_raw:
         raise ConfigError(f"{where}: tables has no entries.")
     tables = tuple(
-        _table(str(name), value, f"{where}: tables.{name}")
-        for name, value in tables_raw.items()
+        _table(name, value, f"{where}: tables entry {index}")
+        for index, (name, value) in enumerate(tables_raw.items(), start=1)
     )
     return Config(
         tables=tables,
@@ -332,8 +346,7 @@ def _table(name: str, raw: object, where: str) -> TableConfig:
     entity_type = entry.get("entity_type")
     if entity_type not in ENTITY_TYPES:
         raise ConfigError(
-            f"{where}.entity_type must be one of: {', '.join(ENTITY_TYPES)}; "
-            f"not {entity_type!r}."
+            f"{where}.entity_type must be one of: {', '.join(ENTITY_TYPES)}."
         )
     pk_raw = entry.get("primary_key")
     if isinstance(pk_raw, list):
@@ -363,7 +376,7 @@ def _table(name: str, raw: object, where: str) -> TableConfig:
     for column in owned:
         if column in primary_key or column in provider_cols:
             raise ConfigError(
-                f"{where}: column {column!r} has more than one role.",
+                f"{where}: reep_id and status columns must not have another role.",
                 hint="reep_id and status need their own columns.",
             )
     if reep_id is not None and reep_id == status:
@@ -389,11 +402,11 @@ def _provider_ids(raw: object, where: str) -> tuple[ProviderColumn, ...]:
         provider, sep, namespace = str(key).strip().lower().partition("/")
         if not sep or not _SLUG.match(provider) or not _SLUG.match(namespace):
             raise ConfigError(
-                f"{where}: {key!r} is not provider/namespace.",
+                f"{where}: each key must be provider/namespace.",
                 hint="Use keys such as transfermarkt/spieler or fbref/person. Run "
                 "'reep providers' to list them.",
             )
-        name = _name(column, f"{where}.{key}", required=True)
+        name = _name(column, f"{where} column", required=True)
         out.append(ProviderColumn(provider, namespace, name or ""))
     return tuple(out)
 
@@ -413,7 +426,7 @@ def _check_keys(
     unknown = sorted(set(entry) - allowed)
     if unknown:
         raise ConfigError(
-            f"{where}: unknown key {unknown[0]!r}.",
+            f"{where}: unknown key; use only the allowed fields.",
             hint=f"Allowed keys: {', '.join(sorted(allowed))}.",
         )
 
@@ -425,7 +438,7 @@ def _name(value: object, where: str, *, required: bool = False) -> str | None:
         return None
     if not isinstance(value, str) or not value.strip():
         raise ConfigError(
-            f"{where} must be a column or table name, not {value!r}.",
+            f"{where} must be a column or table name.",
             hint="Put names that YAML reads as numbers or booleans (on, yes, 1) in "
             "quotes.",
         )

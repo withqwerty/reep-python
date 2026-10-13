@@ -23,7 +23,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `reep-register-v1.duckdb` file (`REEP_DUCKDB_PATH`) or a folder of release CSVs.
   Methods: `resolve`, `resolve_many`, `resolve_frame` (pandas, polars, pyarrow),
   `current`, `translate`, `entity`, `search`, `providers` and `namespaces`.
-- Merged IDs resolve to their survivor; withdrawn IDs return a typed status and no ID.
+- Merged IDs resolve to their survivor, through chains of merges, in the local and API
+  backends; only `active` and `retired` lifecycles are live. Missing or other API
+  lifecycles, withdrawn IDs, redirect loops and chains without a survivor return a
+  typed status and no ID. An entity, `translate` and the database sync also list
+  the bridges that still name an ID merged into the entity (local backend).
 - An error hierarchy under `ReepError`; each error has a code, a hint and a CLI exit code.
 - Incremental sync: `reep.catalog.sync()` replays the changelog chain from the local
   release to the target release and downloads a snapshot when it cannot (no prior,
@@ -42,12 +46,22 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `reep.dbsync` module. A `reep.yml` file names the tables, their primary keys, the Reep
   ID column and the provider ID columns. The sync matches exactly through the local
   catalogue, runs as a dry run unless `--apply` is given, writes a cell only while it is
-  NULL, and writes all cells of a run in one transaction. `--repair-redirected`
-  replaces stored Reep IDs that merged. `reep review` writes a CSV of the cells that
-  need review; both commands exit with 4 when such cells exist. Each run appends a line
+  NULL, and writes all cells of a run in one transaction. Each row gets one `UPDATE`
+  that runs only while every column the sync read is unchanged. The key must be a
+  primary key or a unique key over plain columns, each role needs its own column, an
+  integer or UUID column must keep the provider's exact ID. Two chosen entries cannot
+  name the same physical table. Provider fills need both release and bridge status
+  stamps, present and equal. A blank or uncheckable stored Reep ID blocks provider
+  fills when the row's provider IDs name an entity. `--repair-redirected` replaces
+  stored Reep IDs that merged. `reep review` writes a CSV of the cells that need
+  review; both commands exit with 4 when such cells exist. Each run appends a line
   to a run log (`REEP_LOG_DIR`). Extras: `reep[db]`, `reep[postgres]`, `reep[mysql]`
   and `reep[mssql]`.
-- `DatabaseError` (exit code 6) for database connection and query failures.
+- `DatabaseError` (exit code 6) for database connection and query failures. Messages
+  show only the exception class and a short structured driver code, and suppress the
+  original exception's traceback. Database URLs show only the driver, host, port and
+  database, without credentials or query parameters. Invalid config values are not
+  quoted. URL parsing and engine construction failures raise `ConfigError` (exit 2).
 - `reep mcp`: a read-only MCP server over stdio (extra `reep[mcp]`) with the tools
   `resolve`, `translate`, `current`, `entity`, `search`, `providers` and `status`. The
   tools return the `--json` envelope; errors carry the error code and hint.

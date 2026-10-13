@@ -13,14 +13,28 @@ commands work with each.
 Without `--api` or `--local`, the CLI uses the local catalogue when one exists
 (or `REEP_DUCKDB_PATH`), and otherwise the API when a key is set.
 
+Provider fills need both a release stamp and bridge statuses from that release.
+SDK snapshots and imports checked against a manifest record both stamps. A shipped
+DuckDB file uses its own release stamp for its bridge statuses. A CSV folder without
+a manifest has no stamps, so it can fill Reep IDs but cannot fill provider IDs.
+Changelog replay keeps the older bridge status stamp; take a snapshot before filling
+provider IDs.
+
 ## What the API returns differently
 
 The local data is the full release. The API serves the same release with these
 differences:
 
+- Resolve candidates and redirect targets count as live only when their lifecycle
+  is `active` or `retired`. Any other or missing lifecycle is treated as withdrawn,
+  with `target_not_published` when there is no other reason.
 - Bridges carry no `rung` or `upstream_status`.
-- A withdrawn ID that the release removed (`de_corroborated`, `withheld`) reads as
-  `unknown`, and withdrawn states carry no reason.
+- An entity lists only the bridges that name its own ID. The bridges that still name
+  an ID merged into it are missing, so `translate` can return fewer IDs.
+- A withdrawn ID that the release removed (`de_corroborated`, `withheld`), or an ID
+  merged into an entity that the release does not publish, reads as `unknown` in
+  `current`. A withdrawn state carries a reason only when a redirect chain has no
+  current ID (`redirect_loop`, `target_not_published`).
 - Search returns at most 20 results, and no entity status.
 - `providers()` reports no namespaces, so the SDK cannot check a namespace before
   it asks the API.

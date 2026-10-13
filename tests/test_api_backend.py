@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import itertools
 import logging
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pandas as pd
@@ -394,9 +396,16 @@ def test_parity_between_local_and_api(reg: Register, api: Register) -> None:
             remote_entity.aliases,
             remote_entity.redirected_from,
         )
-        assert [b.provider_id for b in local_entity.bridges] == [
+        # The local backend also lists the bridges that still name an ID merged
+        # into the entity; the API cannot find them.
+        own = [b for b in local_entity.bridges if b.reep_id == local_entity.reep_id]
+        assert [b.provider_id for b in own] == [
             b.provider_id for b in remote_entity.bridges
         ]
+        via = [b for b in local_entity.bridges if b.reep_id != local_entity.reep_id]
+        assert all(
+            reg.current(b.reep_id).current_id == local_entity.reep_id for b in via
+        )
     for query in ("cole palmer", "chelsea"):
         assert [m.reep_id for m in reg.search(query)] == [
             m.reep_id for m in api.search(query)
@@ -413,3 +422,218 @@ def test_known_differences_from_the_local_backend(reg: Register, api: Register) 
     for rid in (DECORROBORATED, WITHHELD):
         assert reg.current(rid).status is IdStatus.WITHDRAWN
         assert api.current(rid).status is IdStatus.UNKNOWN
+
+
+# -- Redirect chains through the API (Codex review r1) -----------------------
+# The API answers a merged ID with its target's entity, one step only.
+
+
+def test_a_chain_of_merges_ends_at_the_survivor(tmp_path: Path) -> None:
+    from tests.support.fixture_release import state_1
+
+    state = state_1()
+    targets = {
+        MERGED: UNPUBLISHED,
+        UNPUBLISHED: MERGED_TO_RETIRED,
+        MERGED_TO_RETIRED: PALMER,
+    }
+    for row in state.redirects:
+        if row["from_id"] in targets:
+            row.update(to_id=targets[row["from_id"]], reason="merged")
+    fake = FakeApi(state=state)
+    with Register(_backend(fake)) as api:
+        current = api.current(MERGED)
+        assert current.status is IdStatus.REDIRECTED
+        assert current.current_id == PALMER
+        assert api.resolve("whoscored/player/333").reep_id == PALMER
+        entity = api.entity(MERGED)
+        assert entity.reep_id == PALMER
+        assert entity.redirected_from == MERGED
+
+
+def test_a_redirect_loop_through_the_api_is_withdrawn() -> None:
+    from tests.support.fixture_release import state_1
+
+    state = state_1()
+    for ent in state.entities:
+        if ent["reep_id"] == PALMER:
+            ent["status"] = "redirected"
+    state.redirects.append({"from_id": PALMER, "to_id": MERGED, "reason": "merged"})
+    fake = FakeApi(state=state)
+    with Register(_backend(fake)) as api:
+        loop = api.current(MERGED)
+        assert loop.status is IdStatus.WITHDRAWN
+        assert loop.reason == "redirect_loop"
+        assert api.resolve("whoscored/player/333").reep_id is None
+
+
+def test_two_candidates_that_merged_into_one_survivor(tmp_path: Path) -> None:
+    from tests.conftest import make_settings
+    from tests.support.fixture_release import state_1, write_release
+
+    state = state_1()
+    for row in state.redirects:
+        if row["from_id"] == UNPUBLISHED:
+            row.update(to_id=PALMER, reason="merged")
+    state.bridges.append(
+        {
+            "provider": "whoscored",
+            "namespace": "player",
+            "external_id": "333",
+            "reep_id": UNPUBLISHED,
+            "rung": "",
+            "upstream_status": "",
+        }
+    )
+    fake = FakeApi(state=state)
+    with Register(_backend(fake)) as api:
+        remote = api.resolve("whoscored/player/333")
+    write_release(tmp_path / "bucket", STAMP_1, state)
+    with Register.local(
+        csv_dir=tmp_path / "bucket" / "releases" / STAMP_1,
+        settings=make_settings(tmp_path / "cache"),
+    ) as local:
+        here = local.resolve("whoscored/player/333")
+    assert remote.status is here.status is ResolutionStatus.FOUND
+    assert remote.reep_id == here.reep_id == PALMER
+
+
+def _chain(hops: int) -> tuple[Any, list[str]]:
+    """A release in which ``chains/person/root`` names the start of ``hops`` merges."""
+    from tests.support.fixture_release import _bridge, _entity, state_1
+
+    state = state_1()
+    ids = [f"rp{0x100000 + i:014x}" for i in range(hops)] + [PALMER]
+    state.entities.extend(
+        _entity(rid, "player", "redirected", f"Chain {i}")
+        for i, rid in enumerate(ids[:-1])
+    )
+    state.redirects.extend(
+        {"from_id": a, "to_id": b, "reason": "merged"}
+        for a, b in itertools.pairwise(ids)
+    )
+    state.bridges.append(_bridge("chains", "person", "root", ids[0], ""))
+    return state, ids
+
+
+def _local(tmp_path: Path, state: Any) -> Register:
+    from tests.support.fixture_release import write_release
+
+    write_release(tmp_path / "bucket", STAMP_1, state)
+    return Register.local(
+        csv_dir=tmp_path / "bucket" / "releases" / STAMP_1,
+        settings=make_settings(tmp_path / "cache"),
+    )
+
+
+@pytest.mark.parametrize("hops", [8, 9])
+def test_chain_length_limit_matches_the_local_backend(
+    tmp_path: Path, hops: int
+) -> None:
+    state, ids = _chain(hops)
+    with (
+        _local(tmp_path, state) as local,
+        Register(_backend(FakeApi(state=state))) as api,
+    ):
+        here, there = local.current(ids[0]), api.current(ids[0])
+        assert (here.status, here.current_id) == (there.status, there.current_id)
+        found, remote = (
+            local.resolve("chains/person/root"),
+            api.resolve("chains/person/root"),
+        )
+        assert (found.status, found.reep_id) == (remote.status, remote.reep_id)
+        assert local.entity(ids[0]).reep_id == api.entity(ids[0]).reep_id
+
+
+@pytest.mark.parametrize(
+    ("status", "error"), [(401, AuthError), (402, QuotaExceededError), (500, ApiError)]
+)
+def test_an_error_inside_a_chain_is_raised(status: int, error: type[Exception]) -> None:
+    state, ids = _chain(3)
+    fake = FakeApi(state=state)
+    original = fake._entity
+
+    def failing(rid: str, include: Any) -> Any:
+        if rid == ids[1]:
+            return status, {"error": "fault", "message": "intermediate entity failed"}
+        return original(rid, include)
+
+    fake._entity = failing  # type: ignore[method-assign,assignment]
+    with Register(_backend(fake)) as api, pytest.raises(error):
+        api.current(ids[0])
+
+
+def test_a_candidate_whose_target_is_missing_is_not_published(tmp_path: Path) -> None:
+    state, ids = _chain(1)
+    missing = ids[-1]
+    state.entities = [e for e in state.entities if e["reep_id"] != missing]
+    state.bridges = [b for b in state.bridges if b["reep_id"] != missing]
+    state.aliases = [a for a in state.aliases if a["reep_id"] != missing]
+    with (
+        _local(tmp_path, state) as local,
+        Register(_backend(FakeApi(state=state))) as api,
+    ):
+        here = local.resolve("chains/person/root")
+        there = api.resolve("chains/person/root")
+    assert there.status is here.status is ResolutionStatus.WITHDRAWN
+    assert there.withdrawn_reason == here.withdrawn_reason == "target_not_published"
+
+
+def test_a_409_that_is_not_an_ambiguity_is_an_error() -> None:
+    fake = FakeApi()
+    fake._resolve = lambda *args: (  # type: ignore[method-assign]
+        409,
+        {"error": "conflict", "message": "lookup index unavailable"},
+    )
+    with Register(_backend(fake)) as api, pytest.raises(ApiError):
+        api.resolve("transfermarkt/spieler/568177")
+
+
+@pytest.mark.parametrize(
+    "lifecycle", ["withdrawn", "unknown", "draft", None, ["active"], False]
+)
+@pytest.mark.parametrize(
+    "surface", ["resolve", "resolve_many", "resolve_ids", "resolve_frame", "current"]
+)
+def test_nonlive_api_payload_never_returns_an_id(lifecycle: Any, surface: str) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/providers"):
+            return httpx.Response(200, json={"providers": [{"name": "p"}]})
+        body: dict[str, Any] = {"reep_id": PALMER, "entity_type": "player"}
+        if lifecycle is not None:
+            body["lifecycle_state"] = lifecycle
+        if surface != "current":
+            body = {"results": [body]}
+        return httpx.Response(200, json={"results": [{"status": 200, "body": body}]})
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as http,
+        Register(ApiBackend("test-key", http=http, retries=0)) as api,
+    ):
+        if surface == "current":
+            state = api.current(PALMER)
+            assert state.status is IdStatus.WITHDRAWN
+            assert state.current_id is None
+            assert state.reason == "target_not_published"
+        elif surface == "resolve_ids":
+            assert api.backend.resolve_ids("p", "person", ["1"]) == [
+                (None, "withdrawn")
+            ]
+        elif surface == "resolve_frame":
+            frame = api.resolve_frame(
+                pd.DataFrame({"pid": ["1"]}),
+                provider="p",
+                namespace="person",
+                column="pid",
+            )
+            assert frame["reep_id"].tolist() == [None]
+            assert frame["reep_status"].tolist() == ["withdrawn"]
+        else:
+            result = (
+                api.resolve("p/person/1")
+                if surface == "resolve"
+                else api.resolve_many(["p/person/1"])[0]
+            )
+            assert result.status is ResolutionStatus.WITHDRAWN
+            assert result.reep_id is None
+            assert result.withdrawn_reason == "target_not_published"

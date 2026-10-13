@@ -148,6 +148,18 @@ def test_convert() -> None:
     assert _convert("abcd", ColumnKind("text")) == "abcd"
 
 
+def test_convert_keeps_the_exact_external_id() -> None:
+    # An integer or UUID column gives back a different text from what was
+    # stored: "0007" reads back as "7", an upper-case UUID as lower case.
+    integer = ColumnKind("integer", max_int=2**31 - 1)
+    assert not isinstance(_convert("0007", integer), int)
+    assert not isinstance(_convert("0", integer), str)
+    upper = str(uuid.UUID(int=5)).upper().replace("0", "A", 1)
+    assert not isinstance(_convert(upper, ColumnKind("uuid")), uuid.UUID)
+    braced = "{" + str(uuid.UUID(int=5)) + "}"
+    assert not isinstance(_convert(braced, ColumnKind("uuid")), uuid.UUID)
+
+
 def test_provider_target_with_two_live_ids_is_ambiguous() -> None:
     planner = _planner()
     plans = _plan(
@@ -171,23 +183,73 @@ def test_provider_target_removed_upstream() -> None:
     assert plans["fbref/person"].outcome == "upstream_removed"
 
 
+FB_TEXT = ProviderId("fbref", "person", "dc7f8a28")
+FB_42 = ProviderId("fbref", "person", "42")
+
+
 def test_provider_target_column_mismatch() -> None:
+    # The runner resolves each provider ID the plan may write; the planner gets
+    # those resolutions with the others.
     planner = _planner(ColumnKind("integer", max_int=100))
     plans = _plan(
         planner,
         _row(tm_id="1"),
-        {TM: _found(TM, P1)},
+        {TM: _found(TM, P1), FB_TEXT: _found(FB_TEXT, P1)},
         bridges={"fbref/person": {P1: [_fbref(P1, "dc7f8a28")]}},
     )
     assert plans["fbref/person"].outcome == "column_mismatch"
     ok = _plan(
         planner,
         _row(tm_id="1"),
-        {TM: _found(TM, P1)},
+        {TM: _found(TM, P1), FB_42: _found(FB_42, P1)},
         bridges={"fbref/person": {P1: [_fbref(P1, "42")]}},
     )
     assert ok["fbref/person"].write is not None
     assert ok["fbref/person"].write.value == 42
+
+
+def test_a_provider_id_must_lead_back_to_the_row() -> None:
+    # The ID is on P1 (through a merged ID), but resolving it gives another
+    # entity or several: writing it would map the row to something else.
+    planner = _planner()
+    bridges = {"fbref/person": {P1: [_fbref("rp00000000000003", "dc7f8a28")]}}
+    elsewhere = _plan(
+        planner,
+        _row(tm_id="1"),
+        {TM: _found(TM, P1), FB_TEXT: _found(FB_TEXT, P2)},
+        bridges=bridges,
+    )
+    assert elsewhere["fbref/person"].outcome == "ambiguous"
+    assert elsewhere["fbref/person"].write is None
+    several = Resolution(
+        query=FB_TEXT, status=ResolutionStatus.AMBIGUOUS, candidates=(P1, P2)
+    )
+    both = _plan(
+        planner,
+        _row(tm_id="1"),
+        {TM: _found(TM, P1), FB_TEXT: several},
+        bridges=bridges,
+    )
+    assert both["fbref/person"].outcome == "ambiguous"
+    unresolved = _plan(planner, _row(tm_id="1"), {TM: _found(TM, P1)}, bridges=bridges)
+    assert unresolved["fbref/person"].write is None
+
+
+def test_one_provider_id_on_the_entity_and_a_merged_id_is_not_ambiguous() -> None:
+    planner = _planner()
+    plans = _plan(
+        planner,
+        _row(tm_id="1"),
+        {TM: _found(TM, P1), FB_TEXT: _found(FB_TEXT, P1)},
+        bridges={
+            "fbref/person": {
+                P1: [_fbref(P1, "dc7f8a28"), _fbref("rp00000000000003", "dc7f8a28")]
+            }
+        },
+    )
+    assert plans["fbref/person"].outcome == "new"
+    assert plans["fbref/person"].write is not None
+    assert plans["fbref/person"].write.value == "dc7f8a28"
 
 
 def test_filled_provider_cells() -> None:
@@ -278,7 +340,7 @@ def test_cell_defaults() -> None:
 
 
 def test_masked_url() -> None:
-    assert masked_url("postgresql://u:pw@h/db") == "postgresql://u:***@h/db"
+    assert masked_url("postgresql://u:pw@h/db") == "postgresql://h/db"
     assert masked_url("not a url") == "(a URL that is not valid)"
 
 
@@ -297,7 +359,7 @@ def test_make_engine_driver_fallbacks() -> None:
 def test_make_engine_errors() -> None:
     with pytest.raises(ConfigError, match="not valid"):
         make_engine("::nope::")
-    with pytest.raises(ConfigError, match="No database driver") as info:
+    with pytest.raises(ConfigError, match="NoSuchModuleError") as info:
         make_engine("oracle+nodriver://u:pw@h/db")
     assert "pw" not in str(info.value)
 
@@ -330,3 +392,20 @@ def test_unique_constraints_without_dialect_support() -> None:
             raise NotImplementedError  # as in the SQL Server dialect
 
     assert _unique_constraints(NoUniqueConstraints(), _table()) == []  # type: ignore[arg-type]
+
+
+def test_a_stored_id_that_cannot_be_checked_blocks_provider_fills() -> None:
+    # The stored Reep ID is unknown to the release; the provider ID says P1. The
+    # row's entity is not proven, so no provider ID is written.
+    planner = _planner()
+    unknown = IdState(reep_id=P2, status=IdStatus.UNKNOWN)
+    plans = _plan(
+        planner,
+        _row(tm_id="1", reep_id=P2),
+        {TM: _found(TM, P1), FB_TEXT: _found(FB_TEXT, P1)},
+        {P2: unknown},
+        bridges={"fbref/person": {P1: [_fbref(P1, "dc7f8a28")]}},
+    )
+    assert plans["fbref/person"].outcome == "conflict"
+    assert plans["fbref/person"].write is None
+    assert "cannot be checked" in (plans["fbref/person"].detail or "")

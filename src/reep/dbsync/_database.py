@@ -7,6 +7,8 @@ names are quoted for each dialect and every value is a bound parameter.
 from __future__ import annotations
 
 import importlib.util
+import re
+from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -15,15 +17,15 @@ import sqlalchemy as sa
 from sqlalchemy import exc as sa_exc
 
 from reep.dbsync._plan import ColumnKind, Row, read_cell
-from reep.errors import ConfigError, DatabaseError
+from reep.errors import ConfigError, DatabaseError, ReepError
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
 
     from reep.dbsync._config import TableConfig
-    from reep.dbsync._plan import Write
 
 __all__ = [
+    "RowUpdate",
     "TableHandle",
     "apply_writes",
     "database_errors",
@@ -54,19 +56,28 @@ _EXTRA_FOR = {
 
 
 def masked_url(url: sa.URL | str) -> str:
-    """Return a database URL with its password hidden.
+    """Return only the driver, host, port and database of a URL.
 
     Args:
         url: The URL.
 
     Returns:
-        The URL text with ``***`` in place of the password.
+        The location, without credentials or query parameters. SQLite keeps its
+        path. An invalid URL returns a fixed description.
     """
     try:
         parsed = sa.make_url(url) if isinstance(url, str) else url
-    except sa_exc.ArgumentError:
+        location = sa.URL.create(
+            drivername=parsed.drivername,
+            host=parsed.host,
+            port=parsed.port,
+            database=parsed.database,
+        )
+        if location.host is None and location.database is None:
+            return f"{location.drivername}:///"
+        return location.render_as_string(hide_password=False)
+    except Exception:
         return "(a URL that is not valid)"
-    return parsed.render_as_string(hide_password=True)
 
 
 def _with_driver(url: sa.URL) -> sa.URL:
@@ -92,60 +103,69 @@ def make_engine(url: str) -> tuple[sa.Engine, str]:
         url: The SQLAlchemy URL.
 
     Returns:
-        The engine and the URL with its password hidden.
+        The engine and the URL location, without credentials or query parameters.
 
     Raises:
-        ConfigError: If the URL is not valid or its driver is not installed.
+        ConfigError: If parsing the URL or creating the engine fails.
     """
+    extra = "the driver for your database"
     try:
         parsed = _with_driver(sa.make_url(url))
-    except sa_exc.ArgumentError as exc:
-        raise ConfigError(
-            "The database URL is not valid.",
-            hint="Use a SQLAlchemy URL such as postgresql://user:password@host/dbname "
-            "or sqlite:///path/to/file.db.",
-        ) from exc
-    shown = masked_url(parsed)
-    try:
+        extra = _EXTRA_FOR.get(parsed.get_backend_name(), extra)
         engine = sa.create_engine(parsed)
-    except (ImportError, sa_exc.NoSuchModuleError) as exc:
-        backend = parsed.get_backend_name()
-        extra = _EXTRA_FOR.get(backend, "the driver for your database")
+    except Exception as exc:
         raise ConfigError(
-            f"No database driver for {shown}: {exc}",
-            hint=f"Install {extra}, for example: pip install '{extra}'.",
-        ) from exc
-    return engine, shown
+            f"Creating the database engine for {masked_url(url)} failed: "
+            f"{type(exc).__name__}.",
+            hint="Check the database URL, the credentials and that the database is "
+            f"running. Install {extra} if the driver is missing.",
+        ) from None
+    return engine, masked_url(parsed)
+
+
+def _error_code(exc: Exception) -> str | None:
+    """Return a short code from structured driver attributes, never diagnostics."""
+    for attribute in ("sqlstate", "pgcode"):
+        code = getattr(exc, attribute, None)
+        if isinstance(code, str) and re.fullmatch(r"[0-9A-Z]{5}", code):
+            return code
+    code = getattr(exc, "sqlite_errorcode", None)
+    if code is None and exc.args:
+        code = exc.args[0]
+    if type(code) is int and 0 <= code <= 999999:
+        return str(code)
+    return None
 
 
 @contextmanager
 def database_errors(shown: str, action: str) -> Iterator[None]:
-    """Turn SQLAlchemy errors into :class:`DatabaseError`.
-
-    The message uses the driver's own error text, not SQLAlchemy's, which can
-    include statement parameters.
+    """Turn database and connection errors into safe :class:`DatabaseError`.
 
     Args:
-        shown: The URL with its password hidden.
+        shown: The URL location, without credentials or query parameters.
         action: What the code was doing, for the message.
 
     Yields:
         Nothing.
 
     Raises:
-        DatabaseError: If a database error occurs.
+        DatabaseError: If database access fails. Only the exception class and a
+            structured driver code appear; the original traceback is suppressed.
     """
     try:
         yield
-    except sa_exc.DBAPIError as exc:
-        detail = " ".join(str(exc.orig).split()) if exc.orig is not None else ""
+    except ReepError:
+        raise
+    except Exception as exc:
+        driver = exc.orig if isinstance(exc, sa_exc.DBAPIError) else exc
+        detail = type(driver).__name__
+        if isinstance(driver, Exception) and (code := _error_code(driver)):
+            detail += f" ({code})"
         raise DatabaseError(
-            f"{action} failed on {shown}: {detail or type(exc).__name__}",
+            f"{action} failed on {shown}: {detail}",
             hint="Check the database URL, the credentials and that the database is "
             "running.",
-        ) from exc
-    except sa_exc.SQLAlchemyError as exc:
-        raise DatabaseError(f"{action} failed on {shown}: {exc}") from exc
+        ) from None
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,6 +187,22 @@ class TableHandle:
     def column(self, name: str) -> sa.Column[Any]:
         """Return the reflected column for a configured column name."""
         return self.table.c[self.columns[name]]
+
+
+@dataclass(frozen=True, slots=True)
+class RowUpdate:
+    """A guarded update of one row.
+
+    Attributes:
+        pk: The primary key values of the row.
+        values: The new value of each cell to write, by configured column name.
+        guard: The value that each column the run read must still hold, by
+            configured column name; ``None`` means NULL.
+    """
+
+    pk: tuple[Any, ...]
+    values: dict[str, Any]
+    guard: dict[str, Any]
 
 
 def column_kind(type_: sa.types.TypeEngine[Any]) -> ColumnKind | None:
@@ -199,7 +235,7 @@ def reflect(engine: sa.Engine, config: TableConfig, shown: str) -> TableHandle:
     Args:
         engine: The engine.
         config: The table entry.
-        shown: The URL with its password hidden.
+        shown: The URL location, without credentials or query parameters.
 
     Returns:
         The handle.
@@ -210,7 +246,10 @@ def reflect(engine: sa.Engine, config: TableConfig, shown: str) -> TableHandle:
         DatabaseError: If the database cannot be read.
     """
     where = f"reep.yml table entry {config.name!r}"
-    with database_errors(shown, f"Reading the structure of {config.qualified_name}"):
+    with database_errors(
+        shown,
+        f"Reading the structure of {config.qualified_name}",
+    ):
         inspector = sa.inspect(engine)
         if not inspector.has_table(config.table, schema=config.schema):
             names = sorted(inspector.get_table_names(schema=config.schema))
@@ -218,20 +257,28 @@ def reflect(engine: sa.Engine, config: TableConfig, shown: str) -> TableHandle:
                 f"{where}: the database has no table {config.qualified_name}.",
                 hint=f"Tables: {', '.join(names[:30]) or '(none)'}.",
             )
+        names = inspector.get_table_names(schema=config.schema)
+        actual_name = config.table
+        if actual_name not in names:
+            folded = [name for name in names if name.lower() == actual_name.lower()]
+            if len(folded) == 1:
+                # has_table succeeded: the database recognises this spelling.
+                actual_name = folded[0]
         table = sa.Table(
-            config.table, sa.MetaData(), schema=config.schema, autoload_with=engine
+            actual_name, sa.MetaData(), schema=config.schema, autoload_with=engine
         )
         pk_names = list(
-            inspector.get_pk_constraint(config.table, schema=config.schema).get(
+            inspector.get_pk_constraint(actual_name, schema=config.schema).get(
                 "constrained_columns"
             )
             or []
         )
-        unique_sets = _unique_constraints(inspector, config)
+        unique_sets = _unique_constraints(inspector, table)
         unique_sets += [
-            [c for c in (i.get("column_names") or []) if c is not None]
-            for i in inspector.get_indexes(config.table, schema=config.schema)
-            if i.get("unique")
+            # _table_wide_unique refuses an index with a column name of None.
+            [c for c in i.get("column_names") or [] if c is not None]
+            for i in inspector.get_indexes(actual_name, schema=config.schema)
+            if _table_wide_unique(i)
         ]
     actual = [c.name for c in table.columns]
     configured = [
@@ -240,6 +287,7 @@ def reflect(engine: sa.Engine, config: TableConfig, shown: str) -> TableHandle:
         *(pc.column for pc in config.provider_ids),
     ]
     columns = {name: _find_column(name, actual, where, config) for name in configured}
+    _check_distinct_roles(config, columns, where)
     for name in (config.reep_id, config.status):
         if name is None:
             continue
@@ -277,13 +325,65 @@ def reflect(engine: sa.Engine, config: TableConfig, shown: str) -> TableHandle:
     return TableHandle(config=config, table=table, columns=columns, kinds=kinds)
 
 
-def _unique_constraints(
-    inspector: sa.Inspector, config: TableConfig
-) -> list[list[str]]:
+def _table_wide_unique(index: Any) -> bool:
+    """Return ``True`` for a unique index over plain columns of every row.
+
+    A partial (filtered) index is unique only among the rows its condition selects,
+    and an index on an expression is not unique on the columns it names.
+    """
+    if not index.get("unique"):
+        return False
+    names = index.get("column_names") or []
+    if not names or any(name is None for name in names) or index.get("expressions"):
+        return False
+    options = index.get("dialect_options") or {}
+    # The condition is a SQL clause; its truth value is not defined, so test None.
+    return not any(
+        key.endswith("_where") and value is not None for key, value in options.items()
+    )
+
+
+def _check_distinct_roles(
+    config: TableConfig, columns: dict[str, str], where: str
+) -> None:
+    """Refuse a config in which two roles name the same column.
+
+    Column names match without regard to case, so ``reep_id`` and ``REEP_ID`` can
+    both find one column; the sync would then write a status over a Reep ID. A
+    provider ID column may also be the key: the sync never writes a key column,
+    because a key is never NULL.
+    """
+    written: list[tuple[str, str]] = [
+        *(
+            (f"{role} {name!r}", name)
+            for role, name in (("reep_id", config.reep_id), ("status", config.status))
+            if name is not None
+        ),
+        *((f"provider_ids {pc.key!r}", pc.column) for pc in config.provider_ids),
+    ]
+    owner: dict[str, str] = {}
+    for role, name in written:
+        actual = columns[name]
+        if actual in owner:
+            raise ConfigError(
+                f"{where}: {role} and {owner[actual]} both name column {actual!r}.",
+                hint="Each role needs its own column.",
+            )
+        owner[actual] = role
+    for name in config.primary_key:
+        role = owner.get(columns[name], "")
+        if role.startswith(("reep_id", "status")):
+            raise ConfigError(
+                f"{where}: primary_key {name!r} and {role} name the same column.",
+                hint="The key must be a column that the sync does not write.",
+            )
+
+
+def _unique_constraints(inspector: sa.Inspector, table: sa.Table) -> list[list[str]]:
     # The SQL Server dialect does not list unique constraints; SQL Server backs each
     # one with a unique index, which get_indexes reports.
     try:
-        found = inspector.get_unique_constraints(config.table, schema=config.schema)
+        found = inspector.get_unique_constraints(table.name, schema=table.schema)
     except NotImplementedError:
         return []
     return [list(u.get("column_names") or []) for u in found]
@@ -318,7 +418,7 @@ def read_rows(
         handle: The table.
         columns: The configured column names to read; the primary key comes first.
         partition_size: The most rows in one partition.
-        shown: The URL with its password hidden.
+        shown: The URL location, without credentials or query parameters.
 
     Yields:
         Lists of rows.
@@ -337,73 +437,161 @@ def read_rows(
     ):
         result = conn.execution_options(yield_per=partition_size).execute(stmt)
         for partition in result.partitions():
-            yield [
+            rows = [
                 Row(
                     pk=tuple(r[:width]),
                     cells={name: read_cell(r[i]) for i, name in enumerate(columns)},
                 )
                 for r in partition
             ]
+            for row in rows:
+                if any(value is None for value in row.pk):
+                    raise ConfigError(
+                        f"reep.yml table entry {handle.config.name!r}: a row of "
+                        f"{handle.config.qualified_name} has NULL in primary_key "
+                        f"{list(pk)}, so the sync cannot name it.",
+                        hint="Use the table's primary key, or a unique key whose "
+                        "columns are NOT NULL.",
+                    )
+            yield rows
 
 
 def apply_writes(
     engine: sa.Engine,
-    groups: Sequence[tuple[TableHandle, str, bool, Sequence[Write]]],
+    groups: Sequence[tuple[TableHandle, Sequence[RowUpdate]]],
     *,
     shown: str,
-) -> list[int]:
-    """Run guarded updates in one transaction.
+) -> list[Counter[str]]:
+    """Run guarded row updates in one transaction.
 
-    Each update names one row by its primary key and changes a cell only while it
-    still holds the value the plan saw: NULL for a new value, or the old value for a
-    replacement. A row that changed in the meantime is left as it is.
+    Each update names one row by its primary key, writes all its planned cells
+    together, and changes the row only while every column the run read still holds
+    the value the run saw. A row that changed in the meantime is left as it is, so
+    no cell gets a value planned from data that is no longer there.
 
     Args:
         engine: The engine.
-        groups: ``(table, column, null_guard, writes)`` tuples. ``null_guard`` is
-            ``True`` when each cell must still be NULL.
-        shown: The URL with its password hidden.
+        groups: ``(table, updates)`` pairs.
+        shown: The URL location, without credentials or query parameters.
 
     Returns:
-        The number of rows updated in each group.
+        For each table, the number of updated rows that wrote each column, by
+        configured column name.
 
     Raises:
         DatabaseError: If an update fails; the transaction is rolled back.
     """
-    counts: list[int] = []
-    with database_errors(shown, "Writing"), engine.begin() as conn:
+    counts: list[Counter[str]] = []
+    with (
+        database_errors(shown, "Writing"),
+        engine.begin() as conn,
+    ):
         multi = bool(conn.dialect.supports_sane_multi_rowcount)
-        for handle, column, null_guard, writes in groups:
-            if not writes:
-                counts.append(0)
-                continue
-            col = handle.column(column)
-            conditions: list[sa.ColumnElement[bool]] = [
-                handle.column(name) == sa.bindparam(f"reep_sync_pk{i}")
-                for i, name in enumerate(handle.config.primary_key)
-            ]
-            conditions.append(
-                col.is_(None) if null_guard else col == sa.bindparam("reep_sync_old")
-            )
-            stmt = (
-                sa.update(handle.table)
-                .where(*conditions)
-                .values({col: sa.bindparam("reep_sync_new")})
-            )
-            params: list[dict[str, Any]] = []
-            for w in writes:
-                item: dict[str, Any] = {"reep_sync_new": w.value}
-                item.update({f"reep_sync_pk{i}": v for i, v in enumerate(w.pk)})
-                if not null_guard:
-                    item["reep_sync_old"] = w.old
-                params.append(item)
-            written = 0
-            if multi:
-                for start in range(0, len(params), _WRITE_CHUNK):
-                    chunk = params[start : start + _WRITE_CHUNK]
-                    written += max(conn.execute(stmt, chunk).rowcount, 0)
-            else:
-                for item in params:
-                    written += max(conn.execute(stmt, item).rowcount, 0)
+        for handle, updates in groups:
+            written: Counter[str] = Counter()
+            # One statement per shape: the columns written and the guards that are
+            # NULL. Every row of a shape writes the same columns, so the rowcount
+            # counts each of them.
+            shapes: dict[
+                tuple[tuple[str, ...], tuple[tuple[str, bool], ...]], list[RowUpdate]
+            ] = {}
+            for update in updates:
+                key = (
+                    tuple(sorted(update.values)),
+                    tuple(sorted((c, v is None) for c, v in update.guard.items())),
+                )
+                shapes.setdefault(key, []).append(update)
+            for (value_cols, guard_shape), rows in shapes.items():
+                stmt = _update_statement(
+                    handle, value_cols, guard_shape, conn.dialect.name
+                )
+                params = [_update_params(u, value_cols, guard_shape) for u in rows]
+                count = 0
+                if multi:
+                    for start in range(0, len(params), _WRITE_CHUNK):
+                        chunk = params[start : start + _WRITE_CHUNK]
+                        count += max(conn.execute(stmt, chunk).rowcount, 0)
+                else:
+                    for item in params:
+                        count += max(conn.execute(stmt, item).rowcount, 0)
+                for column in value_cols:
+                    written[column] += count
             counts.append(written)
     return counts
+
+
+def _exact_equal(
+    col: sa.Column[Any], param: sa.BindParameter[Any], dialect: str
+) -> sa.ColumnElement[bool]:
+    """Return ``col = param`` that compares text byte for byte.
+
+    A case-insensitive collation (SQLite NOCASE, MySQL ``*_ci``, SQL Server ``CI``)
+    makes ``'alpha' = 'ALPHA'`` true, so a guard on a changed provider ID would
+    still pass. SQL Server cannot compare legacy ``text``/``ntext`` with ``=`` at
+    all; the cast to ``nvarchar(max)`` makes it comparable.
+    """
+    if not isinstance(col.type, sa.String):
+        return col == param
+    if dialect == "sqlite":
+        return col.collate("BINARY") == param
+    if dialect == "postgresql":
+        # citext and domains keep their own '=' under COLLATE; compare as text.
+        return sa.cast(col, sa.Text).collate("C") == sa.cast(param, sa.Text)
+    if dialect in ("mysql", "mariadb"):
+        from sqlalchemy.dialects import mysql
+
+        return sa.cast(col, mysql.BINARY()) == sa.cast(param, mysql.BINARY())
+    if dialect == "mssql":
+        from sqlalchemy.dialects import mssql
+
+        return sa.cast(col, mssql.NVARCHAR()).collate("Latin1_General_BIN2") == param
+    return col == param
+
+
+def _update_statement(
+    handle: TableHandle,
+    value_cols: Sequence[str],
+    guard_shape: Sequence[tuple[str, bool]],
+    dialect: str,
+) -> sa.Update:
+    # The key can be a provider ID column, so it compares exactly too.
+    conditions: list[sa.ColumnElement[bool]] = [
+        _exact_equal(handle.column(name), sa.bindparam(f"reep_sync_pk{i}"), dialect)
+        for i, name in enumerate(handle.config.primary_key)
+    ]
+    for i, (name, is_null) in enumerate(guard_shape):
+        col = handle.column(name)
+        conditions.append(
+            col.is_(None)
+            if is_null
+            else _exact_equal(col, sa.bindparam(f"reep_sync_old{i}"), dialect)
+        )
+    return (
+        sa.update(handle.table)
+        .where(*conditions)
+        .values(
+            {
+                handle.column(name): sa.bindparam(f"reep_sync_new{i}")
+                for i, name in enumerate(value_cols)
+            }
+        )
+    )
+
+
+def _update_params(
+    update: RowUpdate,
+    value_cols: Sequence[str],
+    guard_shape: Sequence[tuple[str, bool]],
+) -> dict[str, Any]:
+    item: dict[str, Any] = {f"reep_sync_pk{i}": v for i, v in enumerate(update.pk)}
+    item.update(
+        {f"reep_sync_new{i}": update.values[c] for i, c in enumerate(value_cols)}
+    )
+    item.update(
+        {
+            f"reep_sync_old{i}": update.guard[name]
+            for i, (name, is_null) in enumerate(guard_shape)
+            if not is_null
+        }
+    )
+    return item

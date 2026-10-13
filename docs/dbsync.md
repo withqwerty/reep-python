@@ -44,11 +44,26 @@ tables:
 ```
 
 - `reep providers` lists every `provider/namespace` pair.
-- `primary_key` must be the table's primary key or a unique key. It can be a list.
+- `primary_key` must be the table's primary key or a unique key over plain columns.
+  It can be a list. A partial (filtered) unique index or a unique index on an
+  expression is not a key: it does not name one row. A row whose key holds NULL
+  stops the run before anything is written.
+- Two chosen entries must not name the same physical table, including an explicit
+  default schema. Put all target columns in one entry.
+- Each role needs its own column: `reep_id`, `status` and every provider ID column.
+  Names match without regard to case, so `reep_id` and `REEP_ID` are one column. A
+  provider ID column can also be the key.
 - Provider ID columns can be text, integer or UUID columns. Floating-point columns
-  are refused, because an ID such as 568177 becomes 568177.0.
-- Without `database`, reep reads `REEP_DATABASE_URL`, then `DATABASE_URL`. reep does
-  not show the password in output, errors or logs.
+  are refused, because an ID such as 568177 becomes 568177.0. An integer or UUID
+  column must give back the provider's exact ID: `0007` does not go into an integer
+  column (it would read back as `7`), and the cell is reported as
+  `column_mismatch`.
+- Without `database`, reep reads `REEP_DATABASE_URL`, then `DATABASE_URL`. Output,
+  errors and logs show only `drivername://host[:port]/database`. They omit the
+  username, password and all query parameters. SQLite keeps its file path.
+  Database errors show only the exception class and a short structured error code,
+  when available. They suppress the original exception's traceback. Config errors
+  name the field and expected type without quoting its value.
 - The commands read `./reep.yml`, the file in `REEP_CONFIG`, or `--config PATH`.
 
 ## Run
@@ -67,13 +82,34 @@ They must agree. When two of them point to different entities, the row is a
 
 ### What the sync writes
 
-- The sync writes a cell only while it is NULL (`UPDATE ... WHERE col IS NULL`).
-  A value that is already there does not change, and an empty string counts as a
-  value. A second run with no new data writes nothing.
+- The sync writes a cell only while it is NULL. A value that is already there does
+  not change, and an empty string counts as a value. A second run with no new data
+  writes nothing.
 - `--repair-redirected` is the one exception: it replaces a stored Reep ID that
-  merged into another ID with the survivor, only while the cell still holds the old
-  ID. It is off by default.
+  merged into another ID with the survivor. It is off by default.
+- Each row gets one `UPDATE` with all its planned cells. It changes the row only
+  while every column the sync read (the Reep ID, the status and the provider ID
+  columns) still holds the value the sync saw, compared exactly (a case-insensitive
+  collation does not hide a change from `alpha` to `ALPHA`). When another program
+  changed the row in the meantime, the sync leaves it as it is; the report's
+  `written` count is lower than `planned`.
 - All writes of a run happen in one transaction.
+- Filling provider ID columns (`reep sync fbref`) needs a release stamp and a
+  bridge status stamp from that same release. Missing stamps stop provider fills.
+  Snapshots, manifest-backed imports and stamped release DuckDB files provide them.
+  CSV imports without a manifest do not. A catalogue that `reep catalog sync`
+  updated from changelogs keeps each bridge's
+  `upstream_status` from its last snapshot, so the sync stops and asks you to run
+  `reep catalog sync --method snapshot` first. Filling Reep IDs does not need it.
+- A provider ID can reach a row through an ID that merged into the row's entity.
+  The sync writes it like any other bridge of the entity.
+- Before it writes a provider ID, the sync resolves that ID and writes it only when
+  it leads back to the row's Reep ID and to no other entity. Otherwise the cell is
+  `ambiguous`.
+- A row whose stored Reep ID cannot be checked (unknown to the release, withdrawn,
+  blank, whitespace or not a Reep ID) while its provider IDs name an entity is a
+  `conflict`: the sync writes no provider ID to it. A blank or whitespace Reep ID
+  cell itself still has outcome `invalid_value`.
 - The status column, when you configure one, belongs to the sync. `reep sync reep`
   sets it to `resolved`, `retired` or a review outcome below, and changes it only
   when the value changes.
@@ -133,8 +169,8 @@ Filters: `--table NAME`, `--entity-type TYPE` and `--target NAME`.
 ## Run log
 
 Each run appends one JSON line with the time, the release stamp, the counts and the
-database URL without its password. The default file is `dbsync-runs.jsonl` in the
-platform log directory (`REEP_LOG_DIR` changes it). Set `run_log: path` or
+database location without credentials or query parameters. The default file is
+`dbsync-runs.jsonl` in the platform log directory (`REEP_LOG_DIR` changes it). Set `run_log: path` or
 `run_log: false` in `reep.yml`, or use `--log-file PATH` or `--no-log`.
 
 ## From Python

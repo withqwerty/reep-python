@@ -272,18 +272,23 @@ _MISMATCH = object()
 
 
 def _convert(value: str, kind: ColumnKind) -> object:
+    # An integer or UUID column must give back the exact external ID when read:
+    # "0007" stored as 7 reads back as "7", which is a different provider ID.
     if kind.kind == "integer":
         if not (value.isascii() and value.isdigit()):
             return _MISMATCH
         number = int(value)
+        if str(number) != value:
+            return _MISMATCH
         if kind.max_int is not None and number > kind.max_int:
             return _MISMATCH
         return number
     if kind.kind == "uuid":
         try:
-            return uuid.UUID(value)
+            parsed = uuid.UUID(value)
         except ValueError:
             return _MISMATCH
+        return parsed if str(parsed) == value else _MISMATCH
     if kind.length is not None and len(value) > kind.length:
         return _MISMATCH
     return value
@@ -413,6 +418,21 @@ class Planner:
             conflict = (
                 f"the stored Reep ID gives {stored_current}; the provider IDs give "
                 f"{single}"
+            )
+        cell = row.cells[self.table.reep_id] if self.table.reep_id else None
+        if (
+            conflict is None
+            and single
+            and cell is not None
+            and cell.text is not None
+            and not stored_current
+        ):
+            # A stored value that is unknown, withdrawn or not a Reep ID cannot be
+            # checked against the provider IDs, so the row's entity is not proven.
+            why = state.status.value if state is not None else "not a Reep ID"
+            conflict = (
+                f"the stored Reep ID {cell.text} cannot be checked ({why}); the "
+                f"provider IDs give {single}"
             )
         reep_id = None if conflict else (stored_current or single)
         if reep_id is not None and reep_id == stored_current and state is not None:
@@ -570,14 +590,28 @@ class Planner:
                 detail = f"{ident.reep_id} is a {_entity_type(ident.reep_id)}"
             else:
                 found = list(bridges.get(ident.reep_id, ()))
-                live = [b for b in found if b.upstream_status is None]
-                ids = ", ".join(b.provider_id.external_id for b in found)
+                # One provider ID can be on the entity and on an ID merged into it.
+                live = sorted(
+                    {b.provider_id for b in found if b.upstream_status is None},
+                    key=lambda pid: (pid.namespace, pid.external_id),
+                )
+                ids = ", ".join(dict.fromkeys(b.provider_id.external_id for b in found))
                 if len(live) == 1:
-                    external_id = live[0].provider_id.external_id
-                    value = _convert(external_id, self.kinds[pc.column])
-                    if value is _MISMATCH:
+                    proposed = live[0]
+                    back = resolutions.get(proposed)
+                    value = _convert(proposed.external_id, self.kinds[pc.column])
+                    if (
+                        back is None
+                        or back.status is not ResolutionStatus.FOUND
+                        or back.reep_id != ident.reep_id
+                    ):
+                        # The ID must lead back to this row's entity, and only to
+                        # it; another entity may hold the same provider ID.
+                        outcome = AMBIGUOUS
+                        detail = f"{proposed} does not resolve to {ident.reep_id} only"
+                    elif value is _MISMATCH:
                         outcome = COLUMN_MISMATCH
-                        detail = f"{external_id!r} does not fit the column"
+                        detail = f"{proposed.external_id!r} does not fit the column"
                     else:
                         outcome = NEW
                         write = Write(pc.column, row.pk, value)

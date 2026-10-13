@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import polars as pl
@@ -428,3 +429,106 @@ def test_a_duckdb_file_that_is_not_a_store(tmp_path: Path) -> None:
     con.close()
     with pytest.raises(UnsupportedReleaseError, match="not a Reep store"):
         Register.local(path)
+
+
+# -- Redirect chains that end without a current ID (Codex review r1) ---------
+
+
+def _register_from(tmp_path: Path, state: Any) -> Register:
+    from tests.conftest import make_settings
+    from tests.support.fixture_release import write_release
+
+    write_release(tmp_path / "bucket", STAMP_1, state)
+    return Register.local(
+        csv_dir=tmp_path / "bucket" / "releases" / STAMP_1,
+        settings=make_settings(tmp_path / "cache"),
+    )
+
+
+def test_a_redirect_loop_has_no_current_id(tmp_path: Path) -> None:
+    from tests.support.fixture_release import state_1
+
+    state = state_1()
+    for ent in state.entities:
+        if ent["reep_id"] == PALMER:
+            ent["status"] = "redirected"
+    state.redirects.append({"from_id": PALMER, "to_id": MERGED, "reason": "merged"})
+    with _register_from(tmp_path, state) as reg:
+        loop = reg.current(MERGED)
+        assert loop.status is IdStatus.WITHDRAWN
+        assert loop.current_id is None
+        assert loop.reason == "redirect_loop"
+        found = reg.resolve("whoscored/player/333")
+        assert found.status is ResolutionStatus.WITHDRAWN
+        assert found.reep_id is None
+
+
+def test_a_merge_into_an_id_without_a_survivor_is_withdrawn(tmp_path: Path) -> None:
+    from tests.support.fixture_release import state_1
+
+    state = state_1()
+    state.redirects = [r for r in state.redirects if r["from_id"] != UNPUBLISHED]
+    for row in state.redirects:
+        if row["from_id"] == MERGED:
+            row["to_id"] = UNPUBLISHED
+    with _register_from(tmp_path, state) as reg:
+        result = reg.current(MERGED)
+        assert result.status is IdStatus.WITHDRAWN
+        assert result.current_id is None
+
+
+def test_a_survivor_lists_the_bridges_of_ids_merged_into_it(reg: Register) -> None:
+    # WhoScored 333 still names MERGED, which merged into PALMER.
+    entity = reg.entity(PALMER)
+    via = [b for b in entity.bridges if b.reep_id != PALMER]
+    assert [(str(b.provider_id), b.reep_id) for b in via] == [
+        ("whoscored/player/333", MERGED)
+    ]
+    translated = reg.translate("transfermarkt/spieler/568177", to="whoscored")
+    assert [b.provider_id.external_id for b in translated.targets] == ["333"]
+    assert translated.targets[0].reep_id == MERGED
+
+
+def test_a_bridge_to_an_unpublished_id_is_withdrawn(tmp_path: Path) -> None:
+    # The bridge names an ID that the release does not publish and does not
+    # redirect: no current ID, so no lookup may return it.
+    import pandas as pd
+
+    from tests.support.fixture_release import _bridge, state_1
+
+    state = state_1()
+    state.bridges.append(_bridge("orphan", "person", "u", UNKNOWN, ""))
+    with _register_from(tmp_path, state) as reg:
+        result = reg.resolve("orphan/person/u")
+        assert result.status is ResolutionStatus.WITHDRAWN
+        assert result.reep_id is None
+        assert result.withdrawn_reason == "target_not_published"
+        frame = reg.resolve_frame(
+            pd.DataFrame({"src": ["u"]}),
+            provider="orphan",
+            namespace="person",
+            column="src",
+        )
+        assert frame["reep_status"].tolist() == ["withdrawn"]
+        assert frame["reep_id"].isna().all()
+
+
+def test_bulk_resolution_decides_like_resolve(tmp_path: Path) -> None:
+    from tests.support.fixture_release import _bridge, state_1
+
+    state = state_1()
+    state.bridges.extend(
+        [
+            _bridge("twodead", "person", "x", DECORROBORATED, ""),
+            _bridge("twodead", "person", "x", WITHHELD, ""),
+            _bridge("twodead", "person", "y", MERGED, ""),
+            _bridge("twodead", "person", "y", PALMER, ""),
+        ]
+    )
+    with _register_from(tmp_path, state) as reg:
+        for external_id in ("x", "y", "z"):
+            one = reg.resolve(f"twodead/person/{external_id}")
+            [(rid, status)] = reg.backend.resolve_ids(
+                "twodead", "person", [external_id]
+            )
+            assert (rid, status) == (one.reep_id, one.status.value)

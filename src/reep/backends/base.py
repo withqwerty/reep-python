@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol
 
+from reep.models import Bridge, IdStatus, Resolution, ResolutionStatus
+
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from reep.models import (
         Entity,
@@ -14,10 +16,9 @@ if TYPE_CHECKING:
         ProviderId,
         ProviderNamespace,
         ReleaseInfo,
-        Resolution,
     )
 
-__all__ = ["Backend"]
+__all__ = ["Backend", "resolution_from_states"]
 
 
 class Backend(Protocol):
@@ -75,3 +76,78 @@ class Backend(Protocol):
     def close(self) -> None:
         """Release the backend's resources."""
         ...
+
+
+def resolution_from_states(
+    pid: ProviderId,
+    found: Sequence[tuple[str, str | None, str | None]],
+    states: Mapping[str, IdState],
+    stamp: str | None,
+) -> Resolution:
+    """Return the resolution of a provider ID from its bridges and their states.
+
+    Both backends use this function, so they decide each case the same way.
+
+    Args:
+        pid: The provider ID.
+        found: ``(reep_id, rung, upstream_status)`` of each bridge of ``pid``.
+        states: The state of each Reep ID in ``found``, after its redirects.
+        stamp: The release stamp.
+
+    Returns:
+        The resolution: not found, ambiguous (bridges whose current IDs differ),
+        withdrawn, or found (with ``redirected_from`` for a merged ID).
+    """
+    if not found:
+        return Resolution(
+            query=pid, status=ResolutionStatus.NOT_FOUND, release_stamp=stamp
+        )
+    if len({rid for rid, _, _ in found}) > 1:
+        candidates = tuple(
+            sorted({states[rid].current_id or rid for rid, _, _ in found})
+        )
+        if len(candidates) > 1:
+            return Resolution(
+                query=pid,
+                status=ResolutionStatus.AMBIGUOUS,
+                candidates=candidates,
+                release_stamp=stamp,
+            )
+    rid, rung, upstream = found[0]
+    bridge = Bridge(provider_id=pid, reep_id=rid, rung=rung, upstream_status=upstream)
+    state = states[rid]
+    if state.status not in (IdStatus.ACTIVE, IdStatus.RETIRED, IdStatus.REDIRECTED):
+        # Withdrawn, or an ID the release does not publish (UNKNOWN): no current ID.
+        reason = state.reason
+        if state.status is IdStatus.UNKNOWN:
+            reason = "target_not_published"
+        return Resolution(
+            query=pid,
+            status=ResolutionStatus.WITHDRAWN,
+            bridge=bridge,
+            withdrawn_reason=reason,
+            entity_type=state.entity_type,
+            release_stamp=stamp,
+        )
+    if state.status is IdStatus.REDIRECTED:
+        return Resolution(
+            query=pid,
+            status=ResolutionStatus.FOUND,
+            reep_id=state.current_id,
+            entity_type=state.entity_type,
+            label=state.label,
+            entity_status=state.current_status,
+            bridge=bridge,
+            redirected_from=rid,
+            release_stamp=stamp,
+        )
+    return Resolution(
+        query=pid,
+        status=ResolutionStatus.FOUND,
+        reep_id=rid,
+        entity_type=state.entity_type,
+        label=state.label,
+        entity_status=state.current_status,
+        bridge=bridge,
+        release_stamp=stamp,
+    )

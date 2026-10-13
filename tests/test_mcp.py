@@ -109,7 +109,12 @@ async def test_current_and_entity(server: Any) -> None:
     assert doc["data"]["current_id"] == PALMER
     doc = _ok(await _call(server, "entity", reep_id=PALMER), "show")
     assert doc["data"]["label"] == "Cole Palmer"
-    assert len(doc["data"]["bridges"]) == 6
+    # Six bridges of PALMER, and WhoScored 333, which still names MERGED.
+    assert len(doc["data"]["bridges"]) == 7
+    via = [b for b in doc["data"]["bridges"] if b["reep_id"] != PALMER]
+    assert [(b["provider"], b["external_id"], b["reep_id"]) for b in via] == [
+        ("whoscored", "333", MERGED)
+    ]
 
 
 async def test_search_is_bounded(server: Any) -> None:

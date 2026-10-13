@@ -332,7 +332,9 @@ def test_integer_provider_column(engine: Any, table: Any, reg: Register) -> None
     [target] = report.targets
     expected = dict.fromkeys(dbsync.OUTCOMES, 0)
     expected.update(
-        no_target=8,
+        # Wyscout 777 names MERGED_TO_RETIRED, which merged into RETIRED.
+        new=1,
+        no_target=7,
         withdrawn=3,
         unchanged=1,
         unresolved=5,
@@ -537,7 +539,8 @@ def test_database_error_hides_the_password(reg: Register) -> None:
         dbsync.sync(config, reg, ["reep"])
     text = str(info.value) + json.dumps(info.value.to_dict())
     assert "s3cret-pass" not in text
-    assert "***" in text
+    assert "postgresql://127.0.0.1:9/reep" in text
+    assert "://reep:" not in text
     assert info.value.exit_code == 6
 
 
@@ -551,3 +554,456 @@ def test_rows_are_written_one_by_one_without_multi_rowcount(
     [target] = report.targets
     assert target.written == 6
     assert target.status_written == len(ROWS)
+
+
+# -- Codex review r1 (WIT-3488) ---------------------------------------------
+
+
+def _sqlite(tmp_path: Path, *ddl: str) -> Any:
+    eng = sa.create_engine(f"sqlite:///{tmp_path / 'own.db'}")
+    with eng.begin() as conn:
+        for statement in ddl:
+            conn.exec_driver_sql(statement)
+    return eng
+
+
+def _small_config(**entry: Any) -> dbsync.Config:
+    base: dict[str, Any] = {
+        "table": "players",
+        "entity_type": "player",
+        "primary_key": "id",
+        "reep_id": "reep_id",
+        "provider_ids": {"transfermarkt/spieler": "tm_id"},
+    }
+    base.update(entry)
+    return dbsync.parse_config({"version": 1, "run_log": False, "tables": {"p": base}})
+
+
+def test_two_roles_on_one_column_are_refused(tmp_path: Path, reg: Register) -> None:
+    # Names match without regard to case: status 'REEP_ID' would find the reep_id
+    # column and write "resolved" over a stored Reep ID.
+    eng = _sqlite(
+        tmp_path,
+        "CREATE TABLE players (id INTEGER PRIMARY KEY, reep_id TEXT, tm_id TEXT)",
+        f"INSERT INTO players VALUES (1, '{PALMER}', '568177')",
+    )
+    try:
+        with pytest.raises(ConfigError, match="both name column 'reep_id'"):
+            dbsync.sync(_small_config(status="REEP_ID"), reg, apply=True, engine=eng)
+        with pytest.raises(ConfigError, match="both name column 'tm_id'"):
+            dbsync.sync(_small_config(reep_id="TM_ID"), reg, apply=True, engine=eng)
+        with eng.connect() as conn:
+            assert (
+                conn.exec_driver_sql("SELECT reep_id FROM players").scalar() == PALMER
+            )
+    finally:
+        eng.dispose()
+
+
+def test_a_provider_id_column_can_be_the_key(tmp_path: Path, reg: Register) -> None:
+    eng = _sqlite(
+        tmp_path,
+        "CREATE TABLE players (tm_id TEXT PRIMARY KEY, reep_id TEXT)",
+        "INSERT INTO players VALUES ('568177', NULL)",
+    )
+    try:
+        report = dbsync.sync(
+            _small_config(primary_key="tm_id"), reg, apply=True, engine=eng
+        )
+        assert report.written == 1
+    finally:
+        eng.dispose()
+
+
+@pytest.mark.parametrize(
+    "index",
+    [
+        "CREATE UNIQUE INDEX k ON players (lookup_key) WHERE live = 1",
+        "CREATE UNIQUE INDEX k ON players (lookup_key, lower(tm_id))",
+    ],
+    ids=["partial", "expression"],
+)
+# SQLite does not reflect an expression index (it warns and skips it); PostgreSQL
+# reports it with a column name of None.
+@pytest.mark.filterwarnings("ignore:Skipped unsupported reflection")
+def test_partial_and_expression_indexes_are_not_keys(
+    tmp_path: Path, reg: Register, index: str
+) -> None:
+    # Two rows share lookup_key 'same'; a partial index allows that, so the key
+    # does not name one row, and an UPDATE by it would write both.
+    eng = _sqlite(
+        tmp_path,
+        "CREATE TABLE players (id INTEGER PRIMARY KEY, lookup_key TEXT, "
+        "live INTEGER, tm_id TEXT, reep_id TEXT)",
+        index,
+        "INSERT INTO players VALUES (1, 'same', 1, '568177', NULL), "
+        "(2, 'same', 0, '35664', NULL)",
+    )
+    try:
+        with pytest.raises(ConfigError, match="not the primary key or a unique key"):
+            dbsync.sync(
+                _small_config(primary_key="lookup_key"), reg, apply=True, engine=eng
+            )
+    finally:
+        eng.dispose()
+
+
+def test_a_null_key_stops_the_run(tmp_path: Path, reg: Register) -> None:
+    eng = _sqlite(
+        tmp_path,
+        "CREATE TABLE players (id INTEGER PRIMARY KEY, lookup_key TEXT UNIQUE, "
+        "tm_id TEXT, reep_id TEXT)",
+        "INSERT INTO players VALUES (1, NULL, '568177', NULL)",
+    )
+    try:
+        with pytest.raises(ConfigError, match="NULL in primary_key"):
+            dbsync.sync(
+                _small_config(primary_key="lookup_key"), reg, apply=True, engine=eng
+            )
+    finally:
+        eng.dispose()
+
+
+def test_a_row_that_changed_after_the_read_is_not_written(
+    engine: Any, table: Any, reg: Register, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Row 1 holds Palmer's Transfermarkt ID when read. Another session changes it
+    # to Ozil's before the write; Palmer's Reep ID must not land beside it.
+    from reep.dbsync import _database
+
+    original = _database.apply_writes
+
+    def interleave(eng: Any, groups: Any, **kwargs: Any) -> Any:
+        with eng.begin() as conn:
+            conn.execute(sa.update(table).where(table.c.id == 1).values(tm_id="35664"))
+        return original(eng, groups, **kwargs)
+
+    monkeypatch.setattr(_database, "apply_writes", interleave)
+    report = dbsync.sync(_config(table.name), reg, ["reep"], apply=True, engine=engine)
+    rows = _snapshot(engine, table)
+    assert rows[1]["tm_id"] == "35664"
+    assert rows[1]["reep_id"] is None
+    assert rows[1]["reep_status"] is None
+    [target] = report.targets
+    assert target.written == target.planned - 1
+
+
+def test_one_run_writes_the_reep_id_and_a_provider_id_of_a_row(
+    engine: Any, table: Any, reg: Register
+) -> None:
+    # Both cells of row 1 are planned from what was read; one guarded UPDATE
+    # writes them together.
+    report = dbsync.sync(
+        _config(table.name), reg, ["reep", "fbref"], apply=True, engine=engine
+    )
+    rows = _snapshot(engine, table)
+    assert rows[1]["reep_id"] == PALMER
+    assert rows[1]["fbref_id"] == "dc7f8a28"
+    for target in report.targets:
+        assert target.written == target.planned
+
+
+def test_provider_fill_needs_current_bridge_statuses(
+    tmp_path: Path, server: Any
+) -> None:
+    # A replayed catalogue keeps upstream_status from the last snapshot.
+    from reep import catalog
+    from reep.release import ReleaseClient
+    from tests.conftest import make_settings, no_sleep
+    from tests.support.fixture_release import STAMP_1, STAMP_2
+
+    settings = make_settings(tmp_path / "cache", server.url)
+    with ReleaseClient(server.url, sleep=no_sleep) as rc:
+        catalog.sync(stamp=STAMP_1, settings=settings, client=rc)
+        catalog.sync(stamp=STAMP_2, settings=settings, client=rc)
+    eng = _sqlite(
+        tmp_path,
+        "CREATE TABLE players (id INTEGER PRIMARY KEY, tm_id TEXT, reep_id TEXT, "
+        "fbref_id TEXT)",
+        "INSERT INTO players VALUES (1, '568177', NULL, NULL)",
+    )
+    config = _small_config(
+        provider_ids={"transfermarkt/spieler": "tm_id", "fbref/person": "fbref_id"}
+    )
+    try:
+        with Register.local(settings=settings) as replayed:
+            assert replayed.release.bridge_attributes_stamp == STAMP_1
+            with pytest.raises(ConfigError, match="method snapshot"):
+                dbsync.sync(config, replayed, ["fbref"], engine=eng)
+            report = dbsync.sync(config, replayed, ["reep"], apply=True, engine=eng)
+            assert report.written == 1
+    finally:
+        eng.dispose()
+
+
+@pytest.mark.parametrize(
+    ("url", "secret"),
+    [
+        (
+            "mssql+pyodbc:///?odbc_connect="
+            "DRIVER%3D%7BODBC+Driver+18%7D%3BSERVER%3Ddb%3BUID%3Du%3BPWD%3Ds3cr%3B",
+            "s3cr",
+        ),
+        (
+            "mssql+pyodbc:///?odbc_connect="
+            "DRIVER%3Dx%3BPassword%3D%7Bs3cr%3Bwith%3Bsemis%7D%3BUID%3Du",
+            "s3cr",
+        ),
+        ("postgresql://u@db/x?password=s3cr", "s3cr"),
+        ("postgresql://u:s3cr@db/x?sslmode=require", "s3cr"),
+    ],
+    ids=["odbc-pwd", "odbc-braced-password", "query-password", "url-password"],
+)
+def test_masked_url_hides_every_password(url: str, secret: str) -> None:
+    from urllib.parse import unquote_plus
+
+    from reep.dbsync._database import masked_url
+
+    shown = masked_url(url)
+    assert secret not in unquote_plus(shown)
+    assert "?" not in shown
+    assert "@" not in shown
+
+
+def test_a_case_only_change_after_the_read_is_not_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Under a case-insensitive collation 'alpha' = 'ALPHA'; the guard must still
+    # see that the provider ID changed, because 'ALPHA' names another entity.
+    from reep.dbsync import _database
+    from tests.conftest import make_settings
+    from tests.support.fixture_release import STAMP_1, _bridge, state_1, write_release
+
+    state = state_1()
+    state.bridges.extend(
+        [
+            _bridge("letters", "person", "alpha", PALMER, ""),
+            _bridge("letters", "person", "ALPHA", OZIL, ""),
+        ]
+    )
+    write_release(tmp_path / "bucket", STAMP_1, state)
+    eng = _sqlite(
+        tmp_path,
+        "CREATE TABLE players (id INTEGER PRIMARY KEY, src TEXT COLLATE NOCASE, "
+        "reep_id TEXT)",
+        "INSERT INTO players VALUES (1, 'alpha', NULL)",
+    )
+    original = _database.apply_writes
+
+    def interleave(e: Any, groups: Any, **kwargs: Any) -> Any:
+        with e.begin() as conn:
+            conn.exec_driver_sql("UPDATE players SET src = 'ALPHA' WHERE id = 1")
+        return original(e, groups, **kwargs)
+
+    monkeypatch.setattr(_database, "apply_writes", interleave)
+    config = _small_config(provider_ids={"letters/person": "src"})
+    try:
+        for multi in (True, False):
+            with eng.begin() as conn:
+                conn.exec_driver_sql("UPDATE players SET src = 'alpha', reep_id = NULL")
+            monkeypatch.setattr(eng.dialect, "supports_sane_multi_rowcount", multi)
+            with Register.local(
+                csv_dir=tmp_path / "bucket" / "releases" / STAMP_1,
+                settings=make_settings(tmp_path / "cache"),
+            ) as letters:
+                dbsync.sync(config, letters, apply=True, engine=eng)
+            with eng.connect() as conn:
+                assert (
+                    conn.exec_driver_sql("SELECT reep_id FROM players").scalar() is None
+                )
+    finally:
+        eng.dispose()
+
+
+@pytest.mark.parametrize("legacy", ["TEXT", "NTEXT"])
+def test_sql_server_guards_compare_legacy_text_exactly(legacy: str) -> None:
+    # SQL Server cannot compare text/ntext with '='; the guard casts the column
+    # and compares it with a binary collation.
+    from sqlalchemy.dialects import mssql
+
+    from reep.dbsync import _database
+    from reep.dbsync._config import ProviderColumn, TableConfig
+
+    table = sa.Table(
+        "players",
+        sa.MetaData(),
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("reep_id", sa.String(16)),
+        sa.Column("src", getattr(mssql, legacy)()),
+    )
+    config = TableConfig(
+        "p",
+        "players",
+        "player",
+        ("id",),
+        "reep_id",
+        provider_ids=(ProviderColumn("letters", "person", "src"),),
+    )
+    handle = _database.TableHandle(
+        config,
+        table,
+        {"id": "id", "reep_id": "reep_id", "src": "src"},
+        {"src": _database.column_kind(table.c.src.type)},  # type: ignore[dict-item]
+    )
+    stmt = _database._update_statement(
+        handle, ("reep_id",), (("reep_id", True), ("src", False)), "mssql"
+    )
+    sql = str(stmt.compile(dialect=mssql.dialect()))  # type: ignore[no-untyped-call]
+    assert "CAST(players.src AS NVARCHAR(max)) COLLATE Latin1_General_BIN2" in sql
+
+
+@pytest.mark.parametrize("composite", [False, True])
+def test_a_case_only_change_of_a_provider_key_is_not_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, composite: bool
+) -> None:
+    # The key is the provider ID column. Under NOCASE the key condition
+    # 'alpha' = 'ALPHA' would still find the changed row.
+    from reep.dbsync import _database
+    from tests.conftest import make_settings
+    from tests.support.fixture_release import STAMP_1, _bridge, state_1, write_release
+
+    state = state_1()
+    state.bridges.extend(
+        [
+            _bridge("letters", "person", "alpha", PALMER, ""),
+            _bridge("letters", "person", "ALPHA", OZIL, ""),
+        ]
+    )
+    write_release(tmp_path / "bucket", STAMP_1, state)
+    key = "PRIMARY KEY (src, season)" if composite else "PRIMARY KEY (src)"
+    eng = _sqlite(
+        tmp_path,
+        "CREATE TABLE players (src TEXT COLLATE NOCASE, season INTEGER, "
+        f"reep_id TEXT, {key})",
+    )
+    original = _database.apply_writes
+
+    def interleave(e: Any, groups: Any, **kwargs: Any) -> Any:
+        with e.begin() as conn:
+            conn.exec_driver_sql("UPDATE players SET src = 'ALPHA'")
+        return original(e, groups, **kwargs)
+
+    monkeypatch.setattr(_database, "apply_writes", interleave)
+    config = _small_config(
+        primary_key=["src", "season"] if composite else "src",
+        provider_ids={"letters/person": "src"},
+    )
+    try:
+        for multi in (True, False):
+            with eng.begin() as conn:
+                conn.exec_driver_sql("DELETE FROM players")
+                conn.exec_driver_sql("INSERT INTO players VALUES ('alpha', 2026, NULL)")
+            monkeypatch.setattr(eng.dialect, "supports_sane_multi_rowcount", multi)
+            with Register.local(
+                csv_dir=tmp_path / "bucket" / "releases" / STAMP_1,
+                settings=make_settings(tmp_path / "cache"),
+            ) as letters:
+                report = dbsync.sync(config, letters, apply=True, engine=eng)
+            with eng.connect() as conn:
+                assert (
+                    conn.exec_driver_sql("SELECT reep_id FROM players").scalar() is None
+                )
+            assert report.written == 0
+    finally:
+        eng.dispose()
+
+
+# SQLite ignores the query value (it warns); the URL still carries it.
+@pytest.mark.filterwarnings("ignore:Query string argument")
+def test_unknown_query_values_and_driver_messages_are_hidden(
+    tmp_path: Path, reg: Register
+) -> None:
+    from reep.dbsync._database import database_errors, masked_url
+
+    url = "postgresql://u:pw-secret@db/x?sslmode=require&client_secret=q-secret"
+    shown = masked_url(url)
+    assert "q-secret" not in shown
+    assert "pw-secret" not in shown
+    assert shown == "postgresql://db/x"
+    with (
+        pytest.raises(DatabaseError) as info,
+        database_errors(shown, "Connecting"),
+    ):
+        raise sa.exc.OperationalError(
+            None, None, RuntimeError("password=pw-secret token=q-secret")
+        )
+    assert "pw-secret" not in str(info.value)
+    assert "q-secret" not in str(info.value)
+    # The report and the run log use the hidden form.
+    eng = sa.create_engine(f"sqlite:///{tmp_path / 'q.db'}?client_secret=q-secret")
+    with eng.begin() as conn:
+        conn.exec_driver_sql(
+            "CREATE TABLE players (id INTEGER PRIMARY KEY, tm_id TEXT, reep_id TEXT)"
+        )
+        conn.exec_driver_sql("INSERT INTO players VALUES (1, '568177', NULL)")
+    log = tmp_path / "runs.jsonl"
+    try:
+        report = dbsync.sync(_small_config(), reg, apply=True, engine=eng, run_log=log)
+        assert "q-secret" not in report.database
+        assert "q-secret" not in log.read_text()
+    finally:
+        eng.dispose()
+
+
+def test_postgres_guards_compare_citext_as_text() -> None:
+    from sqlalchemy.dialects import postgresql
+
+    from reep.dbsync import _database
+    from reep.dbsync._config import ProviderColumn, TableConfig
+
+    table = sa.Table(
+        "players",
+        sa.MetaData(),
+        sa.Column("src", postgresql.CITEXT(), primary_key=True),
+        sa.Column("reep_id", sa.String(16)),
+    )
+    config = TableConfig(
+        "p",
+        "players",
+        "player",
+        ("src",),
+        "reep_id",
+        provider_ids=(ProviderColumn("letters", "person", "src"),),
+    )
+    handle = _database.TableHandle(
+        config,
+        table,
+        {"src": "src", "reep_id": "reep_id"},
+        {"src": _database.column_kind(table.c.src.type)},  # type: ignore[dict-item]
+    )
+    stmt = _database._update_statement(
+        handle, ("reep_id",), (("reep_id", True),), "postgresql"
+    )
+    sql = str(stmt.compile(dialect=postgresql.dialect()))  # type: ignore[no-untyped-call]
+    assert 'CAST(players.src AS TEXT) COLLATE "C"' in sql
+
+
+def test_unknown_bridge_status_provenance_blocks_provider_fills() -> None:
+    from types import SimpleNamespace
+
+    from reep.dbsync._plan import Target
+    from reep.dbsync._run import _check_bridge_attributes
+
+    release = SimpleNamespace(stamp="20261005T180536Z", bridge_attributes_stamp=None)
+    register = SimpleNamespace(release=release)
+    provider = Target(
+        "fbref_id",
+        dbsync.parse_config(
+            {
+                "version": 1,
+                "tables": {
+                    "p": {
+                        "table": "t",
+                        "entity_type": "player",
+                        "primary_key": "id",
+                        "provider_ids": {"fbref/person": "fbref_id"},
+                    }
+                },
+            }
+        )
+        .tables[0]
+        .provider_ids[0],
+    )
+    with pytest.raises(ConfigError, match="an unknown release"):
+        _check_bridge_attributes(register, {"p": [provider]})  # type: ignore[arg-type]
+    _check_bridge_attributes(register, {"p": [Target("reep_id")]})  # type: ignore[arg-type]

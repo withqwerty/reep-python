@@ -7,6 +7,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-13
+
 ### Added
 
 - `ProviderId`, a validated `(provider, namespace, external_id)` triple, and the result
@@ -64,5 +66,6 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Package name reservation. The `reep` command prints where to get the register today.
 
-[Unreleased]: https://github.com/withqwerty/reep-python/compare/v0.0.1...HEAD
+[Unreleased]: https://github.com/withqwerty/reep-python/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/withqwerty/reep-python/compare/v0.0.1...v0.1.0
 [0.0.1]: https://github.com/withqwerty/reep-python/releases/tag/v0.0.1

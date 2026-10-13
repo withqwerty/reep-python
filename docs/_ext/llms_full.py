@@ -1,7 +1,9 @@
-"""Write ``llms-full.txt``: the guide pages, the skill file and every command's help.
+"""Write the files for AI agents: ``llms-full.txt`` and a Markdown copy of each page.
 
-The file is built from the same sources as the HTML pages, so it does not drift from
-the code. Sphinx writes it next to ``llms.txt`` in the output folder.
+``llms-full.txt`` holds the guide pages, the skill file and every command's help.
+Each guide page also gets a ``<page>.md`` copy, linked from its HTML head with
+``<link rel="alternate" type="text/markdown">``. The files are built from the same
+sources as the HTML pages, so they do not drift from the code.
 """
 
 from __future__ import annotations
@@ -44,6 +46,20 @@ def cli_help() -> str:
     return "\n\n".join(parts)
 
 
+def page_markdown(srcdir: Path, page: str) -> str:
+    """Return a guide page as Markdown, without Sphinx directives.
+
+    Args:
+        srcdir: The documentation source folder.
+        page: The page name, for example ``"quickstart"``.
+
+    Returns:
+        The Markdown text.
+    """
+    text = (srcdir / f"{page}.md").read_text(encoding="utf-8")
+    return _DIRECTIVE.sub("", text).strip() + "\n"
+
+
 def render(srcdir: Path) -> str:
     """Return the contents of ``llms-full.txt``.
 
@@ -59,9 +75,7 @@ def render(srcdir: Path) -> str:
         "crosswalk of football provider IDs. Exact matching on (provider, namespace, "
         "external_id) only."
     ]
-    for page in PAGES:
-        text = (srcdir / f"{page}.md").read_text(encoding="utf-8")
-        sections.append(_DIRECTIVE.sub("", text).strip())
+    sections.extend(page_markdown(srcdir, page).strip() for page in PAGES)
     skill = files("reep.skill").joinpath("SKILL.md").read_text(encoding="utf-8")
     sections.append("# Agent skill file (SKILL.md)\n\n" + skill.strip())
     sections.append("# Command reference\n\n" + cli_help())
@@ -71,11 +85,25 @@ def render(srcdir: Path) -> str:
 def _write(app: Any, exception: Exception | None) -> None:
     if exception is not None or app.builder.format != "html":
         return
-    out = Path(app.outdir) / "llms-full.txt"
-    out.write_text(render(Path(app.srcdir)), encoding="utf-8")
+    outdir, srcdir = Path(app.outdir), Path(app.srcdir)
+    (outdir / "llms-full.txt").write_text(render(srcdir), encoding="utf-8")
+    for page in PAGES:
+        (outdir / f"{page}.md").write_text(
+            page_markdown(srcdir, page), encoding="utf-8"
+        )
+
+
+def _alternate(
+    app: Any, pagename: str, templatename: str, context: dict[str, Any], doctree: Any
+) -> None:
+    del app, templatename, doctree
+    if pagename in PAGES:
+        link = f'<link rel="alternate" type="text/markdown" href="{pagename}.md">'
+        context["metatags"] = context.get("metatags", "") + link + "\n"
 
 
 def setup(app: Any) -> dict[str, Any]:
     """Register the extension with Sphinx."""
+    app.connect("html-page-context", _alternate)
     app.connect("build-finished", _write)
     return {"version": "1", "parallel_read_safe": True, "parallel_write_safe": True}

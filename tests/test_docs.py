@@ -39,3 +39,17 @@ def test_llms_full_has_every_page_the_skill_and_the_commands() -> None:
 
 def test_llms_txt_links_the_full_file() -> None:
     assert "llms-full.txt" in (DOCS / "llms.txt").read_text()
+
+
+def test_markdown_copies_have_no_directives() -> None:
+    ext = _extension()
+    for page in ext.PAGES:
+        text = ext.page_markdown(DOCS, page)
+        assert text.startswith("# ")
+        assert "{toctree}" not in text
+
+
+def test_llms_txt_uses_the_published_address() -> None:
+    text = (DOCS / "llms.txt").read_text()
+    assert "https://reep.football/docs/python/quickstart.md" in text
+    assert "https://reep.football/docs/python/llms-full.txt" in text

@@ -2,20 +2,22 @@
 
 > Python SDK and command-line tool for the Reep Register, the open crosswalk of football provider IDs. Exact matching on (provider, namespace, external_id) only.
 
-Install: `pip install reep` or `uv tool install reep`. Get the data: `reep catalog sync` (about 210 MB, no key). Add `--json` to any command; check `data.status`; exit codes: 0 ok, 2 usage (read the hint), 3 not found, 4 rows need review, 5 auth, 6 network or database, 7 no catalogue.
+Install: `pip install reep` or `uv tool install reep`. Get the data: `reep catalog sync` (about 210 MB, no key). Add `--json` to any command; check `data.status`; exit codes: 0 ok, 2 usage (read the hint), 3 not found, 4 rows need review, 5 auth, 6 network or database, 7 no catalogue. Agent skill file: `reep skill print`. MCP server: `reep mcp` (extra `reep[mcp]`).
 
 ## Docs
 
-- [llms-full.txt](llms-full.txt): every guide page, the agent skill file and the help text of every command, in one file
-
-- [Quickstart](https://github.com/withqwerty/reep-python/blob/main/docs/quickstart.md): install, sync, lookups from the CLI and Python
-- [Concepts](https://github.com/withqwerty/reep-python/blob/main/docs/concepts.md): provider ID triples, Reep IDs, resolution statuses, stored-ID states, releases
-- [Data sources](https://github.com/withqwerty/reep-python/blob/main/docs/sources.md): local catalogue, CSVs, the release DuckDB file, the hosted API and its differences
-- [Database sync](https://github.com/withqwerty/reep-python/blob/main/docs/dbsync.md): reep.yml, `reep sync` (dry run by default, writes only NULL cells), `reep review`, outcomes
-- [Command line](https://github.com/withqwerty/reep-python/blob/main/docs/cli.md): JSON envelope, errors, exit codes, commands
-- [For AI agents](https://github.com/withqwerty/reep-python/blob/main/docs/agents.md): rules for correct answers
+- [Full documentation in one file](https://reep.football/docs/python/llms-full.txt): every guide page, the agent skill file and the help text of every command
+- [Overview](https://reep.football/docs/python/index.md): what the package does
+- [Quickstart](https://reep.football/docs/python/quickstart.md): install, sync, lookups from the CLI and Python
+- [Concepts](https://reep.football/docs/python/concepts.md): provider ID triples, Reep IDs, resolution statuses, stored-ID states, releases
+- [Data sources](https://reep.football/docs/python/sources.md): local catalogue, CSVs, the release DuckDB file, the hosted API and its differences
+- [Database sync](https://reep.football/docs/python/dbsync.md): reep.yml, `reep sync` (dry run by default, writes only NULL cells), `reep review`, outcomes
+- [Command line](https://reep.football/docs/python/cli.md): JSON envelope, errors, exit codes, commands
+- [For AI agents](https://reep.football/docs/python/agents.md): rules for correct answers, the skill file and the MCP server
 
 ## Optional
 
+- [Python API reference](https://reep.football/docs/python/api.html): every public class and function
+- [Source code](https://github.com/withqwerty/reep-python): MIT licence
 - [Reep Register](https://reep.football): the register, downloads and the hosted API
 - [Corrections](https://reep.football/submit): report a wrong ID or a bad merge

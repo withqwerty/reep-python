@@ -434,7 +434,7 @@ def _name(value: object, where: str, *, required: bool = False) -> str | None:
 
 _TEMPLATE = """\
 # reep.yml: the tables that 'reep sync' fills and 'reep review' checks.
-# Reference: https://github.com/withqwerty/reep-python/blob/main/docs/dbsync.md
+# Reference: https://reep.football/docs/python/dbsync.html
 version: 1
 
 # The database, as a SQLAlchemy URL. ${NAME} reads an environment variable, so

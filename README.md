@@ -48,7 +48,8 @@ no dates of birth, so name matching gives unreliable results.
 
 ## Documentation
 
-The documentation is in [docs/](docs/index.md): a quickstart, the concepts (provider ID
+The documentation is at <https://reep.football/docs/python/> (source in
+[docs/](docs/index.md)): a quickstart, the concepts (provider ID
 triples, stored-ID states, releases), the data sources, the database sync, the command
 line and the Python API. Build it with `uv run --group docs sphinx-build docs docs/_build/html`.
 

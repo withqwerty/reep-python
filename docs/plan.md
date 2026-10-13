@@ -36,7 +36,7 @@ the open crosswalk of football provider IDs. It gives a consumer a short, correc
 | Incremental sync | Clients without an API key follow the changelog chain on the public release bucket. |
 | Python support | CPython versions that have not reached end of life: 3.11 to 3.14 at the time of writing. |
 | Database writes | Dry run by default; `--apply` writes. |
-| Docs site | Open: chosen in U3 (see section 12). |
+| Docs site | Sphinx with Furo, MyST Markdown, autodoc and sphinx-click (chosen in U3). |
 
 ## 3. Users and surfaces
 
@@ -448,8 +448,8 @@ Done at the end of U3, before the 0.1.0 tag:
 
 | Question | Needed by | Notes |
 |---|---|---|
-| Docs site framework | U3 | Candidates: Sphinx with the Furo theme, or a MkDocs-family tool. Check the state of the MkDocs ecosystem at the time. |
-| CLI framework | U3 | Typer or Click. |
+| Docs site framework | Decided in U3 | Sphinx with Furo. MkDocs 1.x is unmaintained and Material for MkDocs is in maintenance mode. |
+| CLI framework | Decided in U3 | Click: small, fast start-up, no Rich dependency, full control of the JSON output. |
 | Python 3.15 | After 0.1.0 | Released 2026-10-09; add it once DuckDB publishes wheels. |
 | Integration with other Reep tools | U5 | Other tools can call the SDK instead of their own lookup code. |
 

@@ -8,26 +8,45 @@
 Python SDK and command-line tool for the [Reep Register](https://reep.football), the
 open crosswalk of football provider IDs.
 
-**Status: in development.** Version 0.0.1 reserves the package name and has no SDK
-functions yet. The first working release is 0.1.0. The [development plan](docs/plan.md)
-describes what it will do and in which order.
+```bash
+pip install reep            # or: uv tool install reep
+reep catalog sync           # download the register (about 210 MB, no key)
+reep resolve transfermarkt spieler 568177
+reep translate transfermarkt/spieler/568177 --to fbref
+```
 
-## Use the register today
+```python
+import reep
 
-- Download the complete release (CSV and DuckDB, CC0): <https://reep.football/downloads>
-- Hosted lookups with an API key: <https://reep.football/api>
+reep.catalog.sync()
+reg = reep.Register.local()
+res = reg.resolve("transfermarkt/spieler/568177")
+print(res.status, res.reep_id, res.label)  # found rp53af22bbeaa667 Cole Jermaine Palmer
+```
 
-## What 0.1.0 will do
+## What it does
 
-- Download and verify a dated release, and keep it current from the release changelogs.
-- Resolve a provider ID, given as the full `(provider, namespace, external_id)` triple,
-  to its Reep ID, and follow merge redirects.
-- Translate an ID from one provider to another.
-- Give AI agents a stable interface: JSON output with a fixed envelope, documented exit
-  codes, and an MCP server.
+- Downloads the dated public release and checks every file against its SHA-256.
+- Keeps the local copy current by replaying the release changelogs, and downloads a
+  snapshot when it cannot.
+- Resolves a provider ID, given as the full `(provider, namespace, external_id)`
+  triple, to its current Reep ID. Merged IDs resolve to their survivor; withdrawn IDs
+  return a status, never an empty ID.
+- Translates an ID from one provider to another, and adds Reep IDs to pandas, polars
+  or pyarrow tables.
+- Reads the SDK catalogue, release CSVs you already have, the release DuckDB file
+  (`REEP_DUCKDB_PATH`), or the hosted API with a key (`REEP_API_KEY`).
+- Gives AI agents a stable interface: `--json` output with a versioned envelope, JSON
+  errors with hints, and fixed exit codes.
 
-Later releases add a guarded sync of Reep IDs into your own Postgres, MySQL or SQL Server
-tables, with a report of the rows it could not resolve.
+Matching is exact. The package does not match records by name: the public release has
+no dates of birth, so name matching gives unreliable results.
+
+## Documentation
+
+The documentation is in [docs/](docs/index.md): a quickstart, the concepts (provider ID
+triples, stored-ID states, releases), the data sources, the command line and the
+Python API. Build it with `uv run --group docs sphinx-build docs docs/_build/html`.
 
 ## Reporting a wrong ID
 
@@ -37,7 +56,8 @@ Data corrections (a wrong ID, a bad merge, a missing entity) go to
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). This project follows the
-[Contributor Covenant](CODE_OF_CONDUCT.md).
+[Contributor Covenant](CODE_OF_CONDUCT.md). The [development plan](docs/plan.md)
+shows the units of work.
 
 ## Licences
 

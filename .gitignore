@@ -22,3 +22,6 @@ htmlcov/
 # Local catalogue files used during development
 *.duckdb
 *.duckdb.wal
+
+# Documentation build
+docs/_build/

@@ -1,0 +1,18 @@
+# reep
+
+> Python SDK and command-line tool for the Reep Register, the open crosswalk of football provider IDs. Exact matching on (provider, namespace, external_id) only.
+
+Install: `pip install reep` or `uv tool install reep`. Get the data: `reep catalog sync` (about 210 MB, no key). Add `--json` to any command; check `data.status`; exit codes: 0 ok, 2 usage (read the hint), 3 not found, 5 auth, 6 network, 7 no catalogue.
+
+## Docs
+
+- [Quickstart](https://github.com/withqwerty/reep-python/blob/main/docs/quickstart.md): install, sync, lookups from the CLI and Python
+- [Concepts](https://github.com/withqwerty/reep-python/blob/main/docs/concepts.md): provider ID triples, Reep IDs, resolution statuses, stored-ID states, releases
+- [Data sources](https://github.com/withqwerty/reep-python/blob/main/docs/sources.md): local catalogue, CSVs, the release DuckDB file, the hosted API and its differences
+- [Command line](https://github.com/withqwerty/reep-python/blob/main/docs/cli.md): JSON envelope, errors, exit codes, commands
+- [For AI agents](https://github.com/withqwerty/reep-python/blob/main/docs/agents.md): rules for correct answers
+
+## Optional
+
+- [Reep Register](https://reep.football): the register, downloads and the hosted API
+- [Corrections](https://reep.football/submit): report a wrong ID or a bad merge

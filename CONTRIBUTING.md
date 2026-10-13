@@ -32,6 +32,7 @@ uv run ruff check .           # lint
 uv run mypy                   # strict type check
 uv run pytest --cov           # tests with coverage (90 % minimum)
 uv build                      # sdist and wheel
+uv run --group docs sphinx-build -W docs docs/_build/html   # documentation
 ```
 
 Tests that call the live Reep release or API carry the `network` marker and do not run by

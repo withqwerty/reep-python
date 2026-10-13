@@ -19,6 +19,7 @@ from reep._version import __version__
 from reep.errors import (
     ApiError,
     AuthError,
+    CatalogInUseError,
     CatalogMissingError,
     ChecksumMismatchError,
     ConfigError,
@@ -54,6 +55,7 @@ __all__ = [
     "ApiError",
     "AuthError",
     "Bridge",
+    "CatalogInUseError",
     "CatalogMissingError",
     "ChecksumMismatchError",
     "ConfigError",

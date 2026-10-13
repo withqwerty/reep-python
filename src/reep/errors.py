@@ -11,6 +11,7 @@ from typing import Any, ClassVar
 __all__ = [
     "ApiError",
     "AuthError",
+    "CatalogInUseError",
     "CatalogMissingError",
     "ChecksumMismatchError",
     "ConfigError",
@@ -190,6 +191,16 @@ class CatalogMissingError(ReepError):
     """No local catalogue exists at the expected location."""
 
     code = "catalog_missing"
+    exit_code = 7
+
+
+class CatalogInUseError(ReepError):
+    """The catalogue file cannot be replaced because another process has it open.
+
+    Windows does not allow a file to be replaced while it is open.
+    """
+
+    code = "catalog_in_use"
     exit_code = 7
 
 

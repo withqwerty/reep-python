@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 import duckdb
 
 from reep._version import __version__
-from reep.errors import UnsupportedReleaseError
+from reep.errors import CatalogInUseError, UnsupportedReleaseError
 from reep.models import WITHDRAWN_REASONS
 
 if TYPE_CHECKING:
@@ -392,10 +392,17 @@ def replace_file(src: Path, dest: Path) -> None:
         dest: The file to replace.
 
     Raises:
-        OSError: If the file cannot be replaced, for example on Windows while
-            another process has ``dest`` open.
+        CatalogInUseError: If the file cannot be replaced because it is open, for
+            example by a ``Register`` on Windows.
     """
-    src.replace(dest)
+    try:
+        src.replace(dest)
+    except PermissionError as exc:
+        raise CatalogInUseError(
+            f"Cannot replace {dest}: another program or Register has it open.",
+            hint="Close every Register and reep process that uses the catalogue, "
+            "then sync again.",
+        ) from exc
 
 
 def remove_db_files(path: Path) -> None:

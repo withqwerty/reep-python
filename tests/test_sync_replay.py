@@ -3,6 +3,7 @@ from __future__ import annotations
 import gzip
 import json
 import shutil
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -10,10 +11,10 @@ from typing import Any
 import duckdb
 import pytest
 
-from reep import Register, catalog
+from reep import Register, _store, catalog
 from reep import changelog as changelog_module
 from reep.config import Settings
-from reep.errors import ConfigError, ReplayError
+from reep.errors import CatalogInUseError, ConfigError, ReplayError
 from reep.release import ReleaseClient
 from tests.conftest import make_settings, no_sleep
 from tests.support.fixture_release import (
@@ -119,13 +120,14 @@ def test_replay_of_two_releases_from_an_old_format(
 def test_replay_with_aliases_and_the_full_profile(
     tmp_path: Path, server: FileServer
 ) -> None:
-    for kwargs in ({"with_aliases": True}, {"profile": "full"}):
-        settings = make_settings(tmp_path / f"cache-{len(kwargs)}-{kwargs}", server.url)
+    variants: tuple[dict[str, Any], ...] = ({"with_aliases": True}, {"profile": "full"})
+    for index, kwargs in enumerate(variants):
+        settings = make_settings(tmp_path / f"cache-{index}", server.url)
         with _client(server) as rc:
             catalog.sync(stamp=STAMP_1, settings=settings, client=rc, **kwargs)
             result = catalog.sync(settings=settings, client=rc)
         assert result.method == "replay", result.notes
-        fresh = make_settings(tmp_path / f"fresh-{len(kwargs)}-{kwargs}", server.url)
+        fresh = make_settings(tmp_path / f"fresh-{index}", server.url)
         with _client(server) as rc:
             catalog.sync(stamp=STAMP_2, settings=fresh, client=rc, **kwargs)
         _assert_same_data(settings.catalog_path, fresh.catalog_path)
@@ -366,6 +368,7 @@ def test_replay_checks_catch_drift(
             catalog.sync(settings=settings, client=rc, method="replay")
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows locks open files")
 def test_replay_while_a_register_is_open(tmp_path: Path, server: FileServer) -> None:
     settings = make_settings(tmp_path / "cache", server.url)
     with _client(server) as rc:
@@ -377,3 +380,25 @@ def test_replay_while_a_register_is_open(tmp_path: Path, server: FileServer) -> 
             assert reg.resolve("transfermarkt/spieler/568177").reep_id == PALMER
     with Register.local(settings=settings) as reg:
         assert reg.release.stamp == STAMP_2
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="only Windows locks open files")
+def test_replace_while_open_on_windows(tmp_path: Path, server: FileServer) -> None:
+    settings = make_settings(tmp_path / "cache", server.url)
+    with _client(server) as rc:
+        catalog.sync(stamp=STAMP_1, settings=settings, client=rc)
+        with Register.local(settings=settings), pytest.raises(CatalogInUseError):
+            catalog.sync(settings=settings, client=rc, method="snapshot")
+    state = catalog.state(settings)
+    assert state is not None
+    assert state.stamp == STAMP_1
+
+
+def test_catalog_in_use_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def refuse(self: Path, target: Path) -> Path:
+        raise PermissionError("in use")
+
+    monkeypatch.setattr(Path, "replace", refuse)
+    with pytest.raises(CatalogInUseError) as exc:
+        _store.replace_file(tmp_path / "a", tmp_path / "b")
+    assert exc.value.exit_code == 7

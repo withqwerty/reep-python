@@ -320,3 +320,13 @@ def test_make_engine_errors() -> None:
 )
 def test_column_kind(type_: Any, kind: ColumnKind | None) -> None:
     assert column_kind(type_) == kind
+
+
+def test_unique_constraints_without_dialect_support() -> None:
+    from reep.dbsync._database import _unique_constraints
+
+    class NoUniqueConstraints:
+        def get_unique_constraints(self, *_args: Any, **_kwargs: Any) -> Any:
+            raise NotImplementedError  # as in the SQL Server dialect
+
+    assert _unique_constraints(NoUniqueConstraints(), _table()) == []  # type: ignore[arg-type]

@@ -227,12 +227,7 @@ def reflect(engine: sa.Engine, config: TableConfig, shown: str) -> TableHandle:
             )
             or []
         )
-        unique_sets = [
-            list(u.get("column_names") or [])
-            for u in inspector.get_unique_constraints(
-                config.table, schema=config.schema
-            )
-        ]
+        unique_sets = _unique_constraints(inspector, config)
         unique_sets += [
             [c for c in (i.get("column_names") or []) if c is not None]
             for i in inspector.get_indexes(config.table, schema=config.schema)
@@ -280,6 +275,18 @@ def reflect(engine: sa.Engine, config: TableConfig, shown: str) -> TableHandle:
             "one row for each key value, so the key must be unique.",
         )
     return TableHandle(config=config, table=table, columns=columns, kinds=kinds)
+
+
+def _unique_constraints(
+    inspector: sa.Inspector, config: TableConfig
+) -> list[list[str]]:
+    # The SQL Server dialect does not list unique constraints; SQL Server backs each
+    # one with a unique index, which get_indexes reports.
+    try:
+        found = inspector.get_unique_constraints(config.table, schema=config.schema)
+    except NotImplementedError:
+        return []
+    return [list(u.get("column_names") or []) for u in found]
 
 
 def _find_column(

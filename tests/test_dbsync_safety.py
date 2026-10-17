@@ -275,7 +275,7 @@ def test_database_errors_never_include_diagnostics(
 @pytest.mark.parametrize(
     "url",
     [
-        "postgresql://u:xy@db/x?client_secret=qq",
+        "postgresql://u:xy@db/x?client_secret=qq-secret",
         "mssql+pyodbc:///?odbc_connect=" + quote_plus("UID=u;PWD=odbc-secret;"),
     ],
 )
@@ -308,7 +308,7 @@ def test_config_errors_do_not_quote_configured_values(
         dbsync.parse_config(data)
     assert url not in str(info.value)
     assert "xy" not in str(info.value)
-    assert "qq" not in str(info.value)
+    assert "qq-secret" not in str(info.value)
     assert "odbc-secret" not in str(info.value)
     import yaml
 
@@ -316,13 +316,13 @@ def test_config_errors_do_not_quote_configured_values(
     path.write_text(yaml.safe_dump(data))
     with pytest.raises(ConfigError) as info:
         dbsync.load_config(path)
-    assert "qq" not in str(info.value)
+    assert "qq-secret" not in str(info.value)
     assert "odbc-secret" not in str(info.value)
     with CliRunner().isolation() as streams:
         code = main(["sync", "reep", "--config", str(path), "--json"])
         output = streams[2].getvalue().decode()
     assert code == 2
-    assert "qq" not in output
+    assert "qq-secret" not in output
     assert "odbc-secret" not in output
 
 

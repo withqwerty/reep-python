@@ -665,4 +665,3 @@ def test_api_translate_many_entities_many_and_telemetry(
     assert isinstance(backend, ApiBackend)
     assert backend.last_call_meta["release_stamp"] == STAMP_1
     assert backend.last_call_meta["key_days_remaining"] == 30
-

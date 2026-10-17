@@ -7,6 +7,31 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-17
+
+### Added
+
+- `Register.translate_many()`, `Register.translate_frame()` (pandas, polars, pyarrow) and
+  `Register.entities_many()` across both local and API backends.
+- `Register.last_call_meta` (`ApiCallMeta`) exposing rate-limit, credit and release
+  headers from the most recent API request.
+- `Register.matches()`, `Register.changes()`, `Register.changes_summary()`,
+  `Register.changes_releases()` and `Register.key_status()` on `Register` for API
+  backends (raising a clear `InvalidArgumentError` with a hint on local backends).
+- Source namespace auto-inference on `Register.resolve()` and `Register.translate()` when
+  a provider has a single namespace or when `entity_type` narrows it to one namespace.
+- MCP batch tools `resolve_many` and `translate_many` (up to 50 items per call).
+
+### Changed
+
+- `ApiBackend.entity()` now fetches an entity with its bridges, aliases and relationships
+  in one HTTP request (`GET /api/v1/entities/{id}?include=bridges,aliases,relationships`)
+  instead of four sequential requests, and supports `include_overlay=True`.
+- `ApiBackend.resolve_many()` batches up to 50 items per `POST /api/v1/batch` call.
+- `LocalBackend.search()` folds diacritics and extended Latin ligatures (`ø`, `ł`, `ß`,
+  `đ`, `æ`, `œ`, Turkish `ı`) in Python before token matching so offline search matches
+  the hosted API on ASCII queries.
+
 ## [0.1.0] - 2026-10-13
 
 ### Added
@@ -80,6 +105,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Package name reservation. The `reep` command prints where to get the register today.
 
-[Unreleased]: https://github.com/withqwerty/reep-python/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/withqwerty/reep-python/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/withqwerty/reep-python/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/withqwerty/reep-python/compare/v0.0.1...v0.1.0
 [0.0.1]: https://github.com/withqwerty/reep-python/releases/tag/v0.0.1

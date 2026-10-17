@@ -261,9 +261,7 @@ class Register:
         Raises:
             InvalidProviderIdError: If an ID is not valid.
         """
-        parsed = [
-            self._coerce_with_inference(p, entity_type=entity_type) for p in pids
-        ]
+        parsed = [self._coerce_with_inference(p, entity_type=entity_type) for p in pids]
         for pid in {(p.provider, p.namespace) for p in parsed}:
             self._check_pair(*pid)
         return self._backend.resolve_many(parsed)
@@ -368,9 +366,7 @@ class Register:
         resolved_ids = sorted(
             {r.reep_id for r in resolutions if r.found and r.reep_id is not None}
         )
-        bridges_by_id = self._backend.bridges_many(
-            resolved_ids, target, target_ns
-        )
+        bridges_by_id = self._backend.bridges_many(resolved_ids, target, target_ns)
         out: list[Translation] = []
         for source, resolution in zip(sources, resolutions, strict=True):
             if not resolution.found or resolution.reep_id is None:
@@ -601,9 +597,7 @@ class Register:
                 f"The frame has no column {column!r}.",
                 hint=f"Columns: {', '.join(names[:20])}.",
             )
-        new_cols = [
-            c for c in (target_col, reep_id_into, status_into) if c is not None
-        ]
+        new_cols = [c for c in (target_col, reep_id_into, status_into) if c is not None]
         for new in new_cols:
             if new in names:
                 raise InvalidArgumentError(
@@ -617,9 +611,7 @@ class Register:
             target,
             namespace=target_ns,
         )
-        by_val: dict[str, Translation] = dict(
-            zip(distinct, translations, strict=True)
-        )
+        by_val: dict[str, Translation] = dict(zip(distinct, translations, strict=True))
         out_cols: dict[str, list[str | None]] = {
             target_col: [
                 (
@@ -772,9 +764,7 @@ class Register:
             }
         return self._pairs
 
-    def _infer_namespace(
-        self, provider: str, *, entity_type: str | None = None
-    ) -> str:
+    def _infer_namespace(self, provider: str, *, entity_type: str | None = None) -> str:
         pairs = self._provider_pairs()
         if provider not in pairs:
             raise self._unknown_provider(provider, pairs)

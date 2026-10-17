@@ -593,4 +593,3 @@ def test_entities_many_and_namespace_inference(reg: Register) -> None:
         df, provider="transfermarkt", entity_type="player", column="tm"
     )
     assert out["reep_id"].tolist() == [PALMER]
-

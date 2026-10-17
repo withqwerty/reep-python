@@ -50,7 +50,9 @@ claude mcp add reep -- reep mcp
 | Tool | Does |
 |---|---|
 | `resolve` | Resolves a provider ID (provider, namespace, external ID) to its Reep ID. |
+| `resolve_many` | Resolves up to 50 provider IDs to their Reep IDs in one call. |
 | `translate` | Returns another provider's IDs for the same entity. |
+| `translate_many` | Translates up to 50 provider IDs to another provider's IDs in one call. |
 | `current` | Returns the state of a stored Reep ID (active, redirected, withdrawn, ...). |
 | `entity` | Returns an entity with its label and all its provider IDs. |
 | `search` | Searches by name, for discovery only (at most 50 results per call). |

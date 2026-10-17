@@ -38,7 +38,17 @@ __all__ = ["INSTRUCTIONS", "MAX_LIMIT", "TOOLS", "create_server"]
 MAX_LIMIT = 50
 
 #: The tool names, in the order the server lists them.
-TOOLS = ("resolve", "translate", "current", "entity", "search", "providers", "status")
+TOOLS = (
+    "resolve",
+    "resolve_many",
+    "translate",
+    "translate_many",
+    "current",
+    "entity",
+    "search",
+    "providers",
+    "status",
+)
 
 #: The instructions the server gives to MCP hosts.
 INSTRUCTIONS = """\
@@ -157,6 +167,19 @@ def create_server(
             lambda reg: reg.resolve((provider, namespace, external_id)),
         )
 
+    @server.tool(title="Resolve many provider IDs", annotations=annotations)
+    def resolve_many(ids: list[str]) -> dict[str, Any]:
+        """Resolve up to 50 provider IDs ("provider/namespace/external_id") in one call.
+
+        Args:
+            ids: Provider ID triples such as ["transfermarkt/spieler/568177"].
+        """
+        if not 1 <= len(ids) <= MAX_LIMIT:
+            raise ToolError(
+                f"invalid_argument: ids must contain between 1 and {MAX_LIMIT} items."
+            )
+        return run("resolve", lambda reg: reg.resolve_many(ids))
+
     @server.tool(title="Translate a provider ID", annotations=annotations)
     def translate(
         provider: str,
@@ -179,6 +202,28 @@ def create_server(
             lambda reg: reg.translate(
                 (provider, namespace, external_id), to, namespace=to_namespace
             ),
+        )
+
+    @server.tool(title="Translate many provider IDs", annotations=annotations)
+    def translate_many(
+        ids: list[str],
+        to: str,
+        to_namespace: str | None = None,
+    ) -> dict[str, Any]:
+        """Translate up to 50 provider IDs to another provider.
+
+        Args:
+            ids: Source provider ID triples such as ["transfermarkt/spieler/568177"].
+            to: The target provider, for example "fbref".
+            to_namespace: Only this namespace of the target provider.
+        """
+        if not 1 <= len(ids) <= MAX_LIMIT:
+            raise ToolError(
+                f"invalid_argument: ids must contain between 1 and {MAX_LIMIT} items."
+            )
+        return run(
+            "translate",
+            lambda reg: reg.translate_many(ids, to, namespace=to_namespace),
         )
 
     @server.tool(title="Check a stored Reep ID", annotations=annotations)

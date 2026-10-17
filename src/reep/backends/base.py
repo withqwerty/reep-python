@@ -58,6 +58,18 @@ class Backend(Protocol):
         """Return the state of stored Reep IDs, in the order given."""
         ...
 
+    def bridges_many(
+        self, reep_ids: Sequence[str], provider: str, namespace: str | None = None
+    ) -> dict[str, list[Bridge]]:
+        """Return the bridges of many entities at one provider."""
+        ...
+
+    def entities_many(
+        self, reep_ids: Sequence[str], *, follow_redirects: bool = True
+    ) -> dict[str, Entity]:
+        """Return many entities with their bridges and aliases."""
+        ...
+
     def entity(self, reep_id: str, *, follow_redirects: bool = True) -> Entity | None:
         """Return an entity with its bridges, or ``None`` if the release lacks it."""
         ...

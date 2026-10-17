@@ -134,6 +134,23 @@ class ApiBackend:
         self.release_stamp: str | None = None
         self.key_expires_at: str | None = None
         self.key_days_remaining: int | None = None
+        self.credits_remaining: int | None = None
+        self.ratelimit_remaining: int | None = None
+        self.ratelimit_reset: int | None = None
+        self.plan: str | None = None
+
+    @property
+    def last_call_meta(self) -> dict[str, Any]:
+        """Return the telemetry headers seen on the latest HTTP response."""
+        return {
+            "release_stamp": self.release_stamp,
+            "key_expires_at": self.key_expires_at,
+            "key_days_remaining": self.key_days_remaining,
+            "credits_remaining": self.credits_remaining,
+            "ratelimit_remaining": self.ratelimit_remaining,
+            "ratelimit_reset": self.ratelimit_reset,
+            "plan": self.plan,
+        }
 
     def close(self) -> None:
         """Close the HTTP client if this object created it."""
@@ -160,21 +177,47 @@ class ApiBackend:
         )
 
     def providers(self) -> list[ProviderNamespace]:
-        """Return the providers with their bridge counts; namespaces are ``None``."""
+        """Return the providers with their bridge counts and namespaces."""
         body = self._get_json("/providers")
         out: list[ProviderNamespace] = []
         for item in body.get("providers") or []:
             if not isinstance(item, dict) or item.get("role") == "overlay_only":
                 continue
-            out.append(
-                ProviderNamespace(
-                    provider=str(item.get("name")),
-                    namespace=None,
-                    bridge_count=int(item.get("bridge_count") or 0),
-                    entity_types=tuple(sorted(item.get("entity_types") or ())),
+            prov = str(item.get("name"))
+            etypes = tuple(sorted(item.get("entity_types") or ()))
+            namespaces = item.get("namespaces")
+            if isinstance(namespaces, dict) and namespaces:
+                for ns, ns_info in namespaces.items():
+                    if not isinstance(ns, str) or not ns:
+                        continue
+                    ns_count = (
+                        int(ns_info.get("bridge_count") or 0)
+                        if isinstance(ns_info, dict)
+                        else int(ns_info or 0)
+                    )
+                    ns_etypes = (
+                        tuple(sorted(ns_info.get("entity_types") or ()))
+                        if isinstance(ns_info, dict) and ns_info.get("entity_types")
+                        else etypes
+                    )
+                    out.append(
+                        ProviderNamespace(
+                            provider=prov,
+                            namespace=ns,
+                            bridge_count=ns_count,
+                            entity_types=ns_etypes,
+                        )
+                    )
+            else:
+                out.append(
+                    ProviderNamespace(
+                        provider=prov,
+                        namespace=None,
+                        bridge_count=int(item.get("bridge_count") or 0),
+                        entity_types=etypes,
+                    )
                 )
-            )
-        return sorted(out, key=lambda p: p.provider)
+        return sorted(out, key=lambda p: (p.provider, p.namespace or ""))
 
     def key_status(self) -> dict[str, Any]:
         """Return the key's plan, expiry and remaining quota (``GET /key``)."""
@@ -216,6 +259,77 @@ class ApiBackend:
     def releases(self) -> dict[str, Any]:
         """Return the release chain (``GET /changes/releases``), cached by ETag."""
         return self._get_json("/changes/releases", etag=True)
+
+    def matches(
+        self,
+        *,
+        season_id: str | None = None,
+        competition_id: str | None = None,
+        team_id: str | None = None,
+        home_team_id: str | None = None,
+        away_team_id: str | None = None,
+        venue_id: str | None = None,
+        date: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Query match fixtures (``GET /matches``)."""
+        params = {
+            "season": season_id,
+            "competition": competition_id,
+            "team": team_id,
+            "home_team": home_team_id,
+            "away_team": away_team_id,
+            "venue": venue_id,
+            "date": date,
+            "date_from": date_from,
+            "date_to": date_to,
+            "limit": str(limit),
+            "offset": str(offset) if offset else None,
+        }
+        body = self._get_json("/matches", {k: v for k, v in params.items() if v})
+        results = body.get("results")
+        if not isinstance(results, list):
+            return []
+        return [r for r in results if isinstance(r, dict)]
+
+    def notices(
+        self,
+        *,
+        provider: str,
+        status: str = "open",
+        limit: int | None = None,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        """Return partner bridge-defect notices (``GET /notices``)."""
+        params = {
+            "provider": provider,
+            "status": status,
+            "limit": str(limit) if limit is not None else None,
+            "cursor": cursor,
+        }
+        return self._get_json("/notices", {k: v for k, v in params.items() if v})
+
+    def acknowledge_notices(
+        self,
+        *,
+        provider: str,
+        ids: Sequence[str],
+        disposition: str,
+        note: str | None = None,
+    ) -> dict[str, Any]:
+        """Acknowledge partner bridge-defect notices (``POST /notices/acknowledge``)."""
+        payload: dict[str, Any] = {
+            "provider": provider,
+            "ids": list(ids),
+            "disposition": disposition,
+        }
+        if note is not None:
+            payload["note"] = note
+        response = self._request("POST", "/notices/acknowledge", json_body=payload)
+        return self._json(response)
 
     # -- lookups -------------------------------------------------------------
 
@@ -336,30 +450,48 @@ class ApiBackend:
         Returns:
             The entity, or ``None`` if the API does not have it.
         """
-        survivor: str | None = None
-        if follow_redirects:
-            state = self.current_many([reep_id])[0]
-            if state.status is IdStatus.UNKNOWN:
-                return None
-            if state.status is IdStatus.REDIRECTED and state.current_id:
-                survivor = state.current_id
         response = self._request(
             "GET",
-            f"/entities/{survivor or reep_id}",
+            f"/entities/{reep_id}",
             params={"include": "aliases,bridges"},
         )
         if response.status_code == 404:
             return None
         body = self._json(response)
-        if survivor is None and body.get("redirected_to"):
-            # Not followed, or a chain with no current ID (a loop or no survivor).
+        redirected = bool(body.get("redirected_to") or body.get("redirected_from"))
+        if redirected and not follow_redirects:
             return Entity(
                 reep_id=reep_id,
                 entity_type=ENTITY_TYPE_BY_LETTER[reep_id[1]],
                 status="redirected",
                 release_stamp=self.release_stamp,
             )
-        redirected_to = survivor
+        redirected_from: str | None = reep_id if redirected else None
+        if redirected and body.get("lifecycle_state") not in _LIVE:
+            # Multi-hop redirect chain or broken target; walk remaining hops.
+            state = self.current_many([reep_id])[0]
+            if state.status is IdStatus.UNKNOWN:
+                return None
+            if state.status is not IdStatus.REDIRECTED or not state.current_id:
+                return Entity(
+                    reep_id=reep_id,
+                    entity_type=ENTITY_TYPE_BY_LETTER[reep_id[1]],
+                    status="redirected",
+                    release_stamp=self.release_stamp,
+                )
+            response = self._request(
+                "GET",
+                f"/entities/{state.current_id}",
+                params={"include": "aliases,bridges"},
+            )
+            if response.status_code == 404:
+                return None
+            body = self._json(response)
+        return self._entity_from_body(body, redirected_from=redirected_from)
+
+    def _entity_from_body(
+        self, body: dict[str, Any], *, redirected_from: str | None = None
+    ) -> Entity:
         target = str(body.get("reep_id"))
         bridges = sorted(
             (
@@ -369,7 +501,13 @@ class ApiBackend:
                         str(b.get("namespace") or ""),
                         str(b.get("external_id")),
                     ),
-                    reep_id=target,
+                    reep_id=str(b.get("reep_id") or target),
+                    rung=str(b.get("rung")) if b.get("rung") else None,
+                    upstream_status=(
+                        str(b.get("upstream_status"))
+                        if b.get("upstream_status")
+                        else None
+                    ),
                 )
                 for b in body.get("bridges") or []
                 if isinstance(b, dict)
@@ -383,17 +521,134 @@ class ApiBackend:
             ),
         )
         country = body.get("country")
+        gender = body.get("gender")
+        grade = body.get("corroboration_grade")
+        count = body.get("corroboration_count")
         return Entity(
             reep_id=target,
             entity_type=str(body.get("entity_type")),
             status=str(body.get("lifecycle_state")),
             label=body.get("name_en") or None,
+            gender=gender if isinstance(gender, str) and gender else None,
             country=country if isinstance(country, str) and country else None,
+            corroboration_grade=grade if isinstance(grade, str) and grade else None,
+            corroboration_count=int(count) if isinstance(count, int) else None,
             bridges=tuple(bridges),
             aliases=_alias_names(body.get("aliases")),
-            redirected_from=reep_id if redirected_to else None,
+            redirected_from=redirected_from,
             release_stamp=self.release_stamp,
         )
+
+    def entities_many(
+        self, reep_ids: Sequence[str], *, follow_redirects: bool = True
+    ) -> dict[str, Entity]:
+        """Return many entities with bridges and aliases via ``POST /batch``."""
+        if not reep_ids:
+            return {}
+        distinct = list(dict.fromkeys(reep_ids))
+        raw_responses: dict[str, tuple[int, dict[str, Any]]] = {}
+        for start in range(0, len(distinct), MAX_ENTITY_BATCH):
+            chunk = distinct[start : start + MAX_ENTITY_BATCH]
+            items = self._batch(
+                [{"type": "entity", "id": rid} for rid in chunk],
+                include=("aliases", "bridges"),
+            )
+            raw_responses.update(zip(chunk, items, strict=True))
+        multi_hop = [
+            rid
+            for rid, (status, body) in raw_responses.items()
+            if status == 200
+            and follow_redirects
+            and (body.get("redirected_to") or body.get("redirected_from"))
+            and body.get("lifecycle_state") not in _LIVE
+        ]
+        resolved_states = (
+            dict(zip(multi_hop, self.current_many(multi_hop), strict=True))
+            if multi_hop
+            else {}
+        )
+        survivors_to_fetch = sorted(
+            {
+                st.current_id
+                for st in resolved_states.values()
+                if st.status is IdStatus.REDIRECTED
+                and st.current_id
+                and st.current_id not in raw_responses
+            }
+        )
+        for start in range(0, len(survivors_to_fetch), MAX_ENTITY_BATCH):
+            chunk = survivors_to_fetch[start : start + MAX_ENTITY_BATCH]
+            items = self._batch(
+                [{"type": "entity", "id": rid} for rid in chunk],
+                include=("aliases", "bridges"),
+            )
+            raw_responses.update(zip(chunk, items, strict=True))
+        entities_by_id: dict[str, Entity] = {}
+        for rid in distinct:
+            status, body = raw_responses[rid]
+            if status == 404:
+                continue
+            if status != 200:
+                raise _error_from(status, body)
+            redirected = bool(body.get("redirected_to") or body.get("redirected_from"))
+            if redirected and not follow_redirects:
+                entities_by_id[rid] = Entity(
+                    reep_id=rid,
+                    entity_type=ENTITY_TYPE_BY_LETTER[rid[1]],
+                    status="redirected",
+                    release_stamp=self.release_stamp,
+                )
+                continue
+            if redirected and body.get("lifecycle_state") not in _LIVE:
+                st = resolved_states[rid]
+                if st.status is IdStatus.UNKNOWN:
+                    continue
+                if st.status is not IdStatus.REDIRECTED or not st.current_id:
+                    entities_by_id[rid] = Entity(
+                        reep_id=rid,
+                        entity_type=ENTITY_TYPE_BY_LETTER[rid[1]],
+                        status="redirected",
+                        release_stamp=self.release_stamp,
+                    )
+                    continue
+                s_status, s_body = raw_responses.get(st.current_id, (404, {}))
+                if s_status == 404:
+                    continue
+                if s_status != 200:
+                    raise _error_from(s_status, s_body)
+                entities_by_id[rid] = self._entity_from_body(
+                    s_body, redirected_from=rid
+                )
+                continue
+            entities_by_id[rid] = self._entity_from_body(
+                body, redirected_from=rid if redirected else None
+            )
+        return entities_by_id
+
+    def bridges_many(
+        self,
+        reep_ids: Sequence[str],
+        provider: str,
+        namespace: str | None = None,
+    ) -> dict[str, list[Bridge]]:
+        """Return bridges for many entities in batched calls."""
+        if not reep_ids:
+            return {}
+        distinct = list(dict.fromkeys(reep_ids))
+        entities = self.entities_many(distinct, follow_redirects=False)
+        out: dict[str, list[Bridge]] = {}
+        for rid in distinct:
+            ent = entities.get(rid)
+            if ent is None:
+                out[rid] = []
+                continue
+            out[rid] = [
+                b
+                for b in ent.bridges
+                if b.provider_id.provider == provider
+                and (namespace is None or b.provider_id.namespace == namespace)
+            ]
+        return out
 
     def search(
         self,
@@ -424,7 +679,21 @@ class ApiBackend:
                 reep_id=str(item.get("reep_id")),
                 entity_type=str(item.get("entity_type")),
                 label=item.get("label") or None,
-                status=None,
+                status=(
+                    str(item.get("status"))
+                    if isinstance(item.get("status"), str) and item.get("status")
+                    else None
+                ),
+                gender=(
+                    str(item.get("gender"))
+                    if isinstance(item.get("gender"), str) and item.get("gender")
+                    else None
+                ),
+                country=(
+                    str(item.get("country"))
+                    if isinstance(item.get("country"), str) and item.get("country")
+                    else None
+                ),
                 bridge_count=int(item.get("bridge_count") or 0),
                 rank=min(int(item.get("relevance") or 0), 3),
             )
@@ -444,11 +713,11 @@ class ApiBackend:
         found: list[tuple[str, str | None, str | None]] = []
         states: dict[str, IdState] = {}
         for env in candidates:
-            rid = str(env.get("reep_id"))
-            if rid in states:
+            origin = str(env.get("redirected_from") or env.get("reep_id"))
+            if origin in states:
                 continue
-            states[rid] = self._candidate_state(rid, env, merged_states)
-            found.append((rid, None, None))
+            states[origin] = self._candidate_state(origin, env, merged_states)
+            found.append((origin, None, None))
         return resolution_from_states(pid, found, states, self.release_stamp)
 
     def _candidate_state(
@@ -457,7 +726,23 @@ class ApiBackend:
         """Return the state of a resolve candidate, after its redirects."""
         stamp = self.release_stamp
         lifecycle = env.get("lifecycle_state")
+        target = str(env.get("reep_id"))
         etype = env.get("entity_type") or ENTITY_TYPE_BY_LETTER.get(rid[1])
+        if (
+            env.get("redirected_from")
+            and isinstance(lifecycle, str)
+            and lifecycle in _LIVE
+        ):
+            return IdState(
+                reep_id=rid,
+                status=IdStatus.REDIRECTED,
+                current_id=target,
+                current_status=str(lifecycle),
+                reason="merged",
+                entity_type=etype,
+                label=env.get("name_en") or None,
+                release_stamp=stamp,
+            )
         if lifecycle != "redirected":
             if not isinstance(lifecycle, str) or lifecycle not in _LIVE:
                 return IdState(
@@ -572,9 +857,15 @@ class ApiBackend:
     # -- HTTP ----------------------------------------------------------------
 
     def _batch(
-        self, requests: list[dict[str, str]]
+        self,
+        requests: list[dict[str, Any]],
+        *,
+        include: Sequence[str] | None = None,
     ) -> list[tuple[int, dict[str, Any]]]:
-        response = self._request("POST", "/batch", json_body={"requests": requests})
+        payload: dict[str, Any] = {"requests": requests}
+        if include:
+            payload["include"] = list(include)
+        response = self._request("POST", "/batch", json_body=payload)
         body = self._json(response)
         results = body.get("results")
         if not isinstance(results, list) or len(results) != len(requests):
@@ -585,8 +876,8 @@ class ApiBackend:
         out: list[tuple[int, dict[str, Any]]] = []
         for item in results:
             status = int(item.get("status", 0)) if isinstance(item, dict) else 0
-            payload = item.get("body") if isinstance(item, dict) else None
-            out.append((status, payload if isinstance(payload, dict) else {}))
+            payload_body = item.get("body") if isinstance(item, dict) else None
+            out.append((status, payload_body if isinstance(payload_body, dict) else {}))
         return out
 
     def _get_json(
@@ -668,6 +959,18 @@ class ApiBackend:
         expires = response.headers.get("X-Reep-Key-Expires")
         if expires:
             self.key_expires_at = expires
+        plan = response.headers.get("X-Reep-Plan")
+        if plan:
+            self.plan = plan
+        credits = response.headers.get("X-Reep-Credits-Remaining", "")
+        if credits.lstrip("-").isdigit():
+            self.credits_remaining = int(credits)
+        rl_rem = response.headers.get("X-Reep-Ratelimit-Remaining", "")
+        if rl_rem.lstrip("-").isdigit():
+            self.ratelimit_remaining = int(rl_rem)
+        rl_reset = response.headers.get("X-Reep-Ratelimit-Reset", "")
+        if rl_reset.isdigit():
+            self.ratelimit_reset = int(rl_reset)
         days = response.headers.get("X-Reep-Key-Days-Remaining", "")
         if days.lstrip("-").isdigit():
             self.key_days_remaining = int(days)

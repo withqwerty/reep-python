@@ -532,3 +532,65 @@ def test_bulk_resolution_decides_like_resolve(tmp_path: Path) -> None:
                 "twodead", "person", [external_id]
             )
             assert (rid, status) == (one.reep_id, one.status.value)
+
+
+def test_translate_many_and_translate_frame(reg: Register) -> None:
+    results = reg.translate_many(
+        ["transfermarkt/spieler/568177", "transfermarkt/spieler/1"],
+        to="fbref",
+    )
+    assert len(results) == 2
+    assert [str(t.provider_id) for t in results[0].targets] == ["fbref/person/dc7f8a28"]
+    assert results[1].targets == ()
+
+    df = pd.DataFrame({"tm": ["568177", "1", None]})
+    out = reg.translate_frame(
+        df,
+        provider="transfermarkt",
+        namespace="spieler",
+        column="tm",
+        to="fbref",
+        reep_id_into="reep_id",
+        status_into="status",
+    )
+    assert [None if pd.isna(v) else v for v in out["fbref_id"].tolist()] == [
+        "dc7f8a28",
+        None,
+        None,
+    ]
+    assert [None if pd.isna(v) else v for v in out["reep_id"].tolist()] == [
+        PALMER,
+        None,
+        None,
+    ]
+    assert [None if pd.isna(v) else v for v in out["status"].tolist()] == [
+        "found",
+        "not_found",
+        None,
+    ]
+
+
+def test_entities_many_and_namespace_inference(reg: Register) -> None:
+    entities = reg.entities_many([PALMER, MERGED, UNKNOWN])
+    assert entities[0] is not None
+    assert entities[0].reep_id == PALMER
+    assert entities[1] is not None
+    assert entities[1].reep_id == PALMER
+    assert entities[1].redirected_from == MERGED
+    assert entities[2] is None
+
+    # Single-namespace provider infers automatically:
+    assert reg.resolve("whoscored/333").reep_id == PALMER
+    assert reg.resolve(("whoscored", "333")).reep_id == PALMER
+    # Multi-namespace provider infers when entity_type disambiguates:
+    assert reg.resolve("transfermarkt/568177", entity_type="player").reep_id == PALMER
+    assert reg.resolve("transfermarkt/568177", entity_type="coach").reep_id == MARESCA
+    with pytest.raises(InvalidProviderIdError, match="three parts"):
+        reg.resolve("transfermarkt/568177")
+
+    df = pd.DataFrame({"tm": ["568177"]})
+    out = reg.resolve_frame(
+        df, provider="transfermarkt", entity_type="player", column="tm"
+    )
+    assert out["reep_id"].tolist() == [PALMER]
+

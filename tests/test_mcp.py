@@ -101,6 +101,25 @@ async def test_translate(server: Any) -> None:
         "translate",
     )
     assert [t["external_id"] for t in doc["data"]["targets"]] == ["dc7f8a28"]
+    many_res = _ok(
+        await _call(
+            server,
+            "resolve_many",
+            ids=["transfermarkt/spieler/568177", "transfermarkt/spieler/1"],
+        ),
+        "resolve",
+    )
+    assert [r["reep_id"] for r in many_res["data"]] == [PALMER, None]
+    many_tr = _ok(
+        await _call(
+            server,
+            "translate_many",
+            ids=["transfermarkt/spieler/568177"],
+            to="fbref",
+        ),
+        "translate",
+    )
+    assert [t["external_id"] for t in many_tr["data"][0]["targets"]] == ["dc7f8a28"]
 
 
 async def test_current_and_entity(server: Any) -> None:

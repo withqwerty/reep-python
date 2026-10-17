@@ -298,6 +298,13 @@ class FakeApi:
         resolves = sum(1 for r in requests if r.get("type") == "resolve")
         if resolves > MAX_BATCH_RESOLVE:
             return self._json({"error": "resolve_batch_too_large"}, 400)
+        raw_inc = body.get("include")
+        if isinstance(raw_inc, list):
+            include_str = ",".join(str(x) for x in raw_inc)
+        elif isinstance(raw_inc, str):
+            include_str = raw_inc
+        else:
+            include_str = ""
         results = []
         for item in requests:
             if item.get("type") == "resolve":
@@ -305,7 +312,7 @@ class FakeApi:
                     item["provider"], item["external_id"], item.get("namespace", "")
                 )
             elif item.get("type") == "entity":
-                status, out = self._entity(item["id"], "")
+                status, out = self._entity(item["id"], include_str)
             else:
                 status, out = 400, {"error": "unknown_batch_item_type"}
             results.append({"status": status, "body": out})

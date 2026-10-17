@@ -637,3 +637,32 @@ def test_nonlive_api_payload_never_returns_an_id(lifecycle: Any, surface: str) -
             assert result.status is ResolutionStatus.WITHDRAWN
             assert result.reep_id is None
             assert result.withdrawn_reason == "target_not_published"
+
+
+def test_api_translate_many_entities_many_and_telemetry(
+    api: Register, fake: FakeApi
+) -> None:
+    results = api.translate_many(
+        ["transfermarkt/spieler/568177", "transfermarkt/spieler/1"],
+        to="fbref",
+    )
+    assert len(results) == 2
+    assert [str(t.provider_id) for t in results[0].targets] == ["fbref/person/dc7f8a28"]
+    assert results[1].targets == ()
+
+    entities = api.entities_many([PALMER, MERGED, UNKNOWN])
+    assert entities[0] is not None
+    assert entities[0].reep_id == PALMER
+    assert entities[1] is not None
+    assert entities[1].reep_id == PALMER
+    assert entities[1].redirected_from == MERGED
+    assert entities[2] is None
+
+    assert api.key_status()["key"]["plan"] == "evaluation"
+    assert api.changes(since=STAMP_1)["count"] == 0
+    assert api.releases()["latest"] == STAMP_1
+    backend = api.backend
+    assert isinstance(backend, ApiBackend)
+    assert backend.last_call_meta["release_stamp"] == STAMP_1
+    assert backend.last_call_meta["key_days_remaining"] == 30
+

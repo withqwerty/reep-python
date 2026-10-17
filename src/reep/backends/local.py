@@ -8,6 +8,7 @@ so several processes can read it at the same time.
 from __future__ import annotations
 
 import logging
+import unicodedata
 from typing import TYPE_CHECKING, Any
 
 from reep import _store
@@ -40,6 +41,19 @@ logger = logging.getLogger(__name__)
 _MAX_REDIRECT_HOPS = 8
 # Entity statuses that end a redirect chain; any other status has no current ID.
 _LIVE = frozenset({"active", "retired"})
+_STRIP_ACCENTS_TABLE = str.maketrans(
+    {
+        "ß": "ss",
+        "æ": "ae",
+        "œ": "oe",
+        "ø": "o",
+        "ł": "l",
+        "đ": "d",
+        "ð": "d",
+        "þ": "th",
+        "\u0131": "i",
+    }
+)
 
 _BRIDGES_FOR_TRIPLES = """
 WITH q AS (
@@ -338,6 +352,113 @@ class LocalBackend:
         states = self._states(set(reep_ids))
         return [states[rid] for rid in reep_ids]
 
+    def entities_many(
+        self, reep_ids: Sequence[str], *, follow_redirects: bool = True
+    ) -> dict[str, Entity]:
+        """Return many entities with their bridges and aliases in bulk.
+
+        Args:
+            reep_ids: Valid Reep IDs.
+            follow_redirects: Return the survivor when an ID merged into another.
+
+        Returns:
+            ``{requested_reep_id: Entity}`` for each ID found in the store.
+        """
+        if not reep_ids:
+            return {}
+        unique_ids = list(dict.fromkeys(reep_ids))
+        states = self._states(set(unique_ids))
+        target_by_req: dict[str, str] = {}
+        live_targets: set[str] = set()
+        for rid in unique_ids:
+            state = states[rid]
+            target = rid
+            if (
+                follow_redirects
+                and state.status is IdStatus.REDIRECTED
+                and state.current_id
+            ):
+                target = state.current_id
+            target_by_req[rid] = target
+            if target_state(state, target) in _LIVE:
+                live_targets.add(target)
+
+        targets = sorted(set(target_by_req.values()))
+        merged_owner = self._merged_into(sorted(live_targets)) if live_targets else {}
+        bridge_sources = sorted(set(targets) | set(merged_owner))
+
+        entity_rows = {
+            str(row[0]): row
+            for row in self._query(
+                "SELECT reep_id, entity_type, status, nullif(label, ''), "
+                "nullif(gender, ''), nullif(country, ''), "
+                "nullif(corroboration_grade, ''), nullif(corroboration_count, '') "
+                "FROM entities WHERE reep_id IN (SELECT unnest($ids))",
+                {"ids": targets},
+            )
+        }
+        if not entity_rows:
+            return {}
+
+        bridges_by_target: dict[str, list[Bridge]] = {t: [] for t in entity_rows}
+        if bridge_sources:
+            for owner_id, p, n, x, rung, upstream in self._query(
+                "SELECT reep_id, provider, namespace, external_id, nullif(rung, ''), "
+                "nullif(upstream_status, '') FROM bridges "
+                "WHERE reep_id IN (SELECT unnest($ids)) "
+                "ORDER BY provider, namespace, external_id, reep_id",
+                {"ids": bridge_sources},
+            ):
+                owner_str = str(owner_id)
+                bridge_obj = Bridge(
+                    provider_id=ProviderId(str(p), str(n), str(x)),
+                    reep_id=owner_str,
+                    rung=rung,
+                    upstream_status=upstream,
+                )
+                if owner_str in bridges_by_target:
+                    bridges_by_target[owner_str].append(bridge_obj)
+                survivor_str = merged_owner.get(owner_str)
+                if survivor_str and survivor_str in bridges_by_target:
+                    bridges_by_target[survivor_str].append(bridge_obj)
+
+        aliases_by_target: dict[str, list[str]] = {t: [] for t in entity_rows}
+        if "aliases" in self._tables:
+            for tid, alias in self._query(
+                "SELECT reep_id, alias FROM aliases "
+                "WHERE reep_id IN (SELECT unnest($ids)) "
+                "GROUP BY reep_id, alias "
+                "ORDER BY reep_id, min(TRY_CAST(rank AS INTEGER)) NULLS LAST, alias",
+                {"ids": sorted(entity_rows)},
+            ):
+                aliases_by_target[str(tid)].append(str(alias))
+
+        stamp = self.stamp
+        out: dict[str, Entity] = {}
+        for req_id, target in target_by_req.items():
+            row = entity_rows.get(target)
+            if row is None:
+                continue
+            rid, etype, status, label, gender, country, grade, count = row
+            deduped_bridges = tuple(
+                _unique_bridges(bridges_by_target.get(target, []), target)
+            )
+            out[req_id] = Entity(
+                reep_id=str(rid),
+                entity_type=str(etype),
+                status=str(status),
+                label=label,
+                gender=gender,
+                country=country,
+                corroboration_grade=grade,
+                corroboration_count=int(count) if count is not None else None,
+                bridges=deduped_bridges,
+                aliases=tuple(aliases_by_target.get(target, ())),
+                redirected_from=req_id if target != req_id else None,
+                release_stamp=stamp,
+            )
+        return out
+
     def entity(self, reep_id: str, *, follow_redirects: bool = True) -> Entity | None:
         """Return an entity with its bridges and aliases.
 
@@ -348,68 +469,87 @@ class LocalBackend:
         Returns:
             The entity, or ``None`` if the store does not have it.
         """
-        state = self._states({reep_id})[reep_id]
-        target = reep_id
-        if (
-            follow_redirects
-            and state.status is IdStatus.REDIRECTED
-            and state.current_id
-        ):
-            target = state.current_id
-        sources = [target]
-        if target_state(state, target) in _LIVE:
-            sources.extend(self._merged_into([target]))
-        rows = self._query(
-            "SELECT reep_id, entity_type, status, nullif(label, ''), "
-            "nullif(gender, ''), nullif(country, ''), "
-            "nullif(corroboration_grade, ''), nullif(corroboration_count, '') "
-            "FROM entities WHERE reep_id = $id",
-            {"id": target},
+        return self.entities_many([reep_id], follow_redirects=follow_redirects).get(
+            reep_id
         )
-        if not rows:
-            return None
-        rid, etype, status, label, gender, country, grade, count = rows[0]
-        bridges = tuple(
-            Bridge(
-                provider_id=ProviderId(str(p), str(n), str(x)),
-                reep_id=str(owner),
-                rung=rung,
-                upstream_status=upstream,
+
+    def matches(
+        self,
+        *,
+        competition_id: str | None = None,
+        season_id: str | None = None,
+        team_id: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        status: str | None = None,
+        limit: int = 25,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Query matches from the local store (requires ``matches`` table).
+
+        Args:
+            competition_id: Filter by competition Reep ID.
+            season_id: Filter by season Reep ID.
+            team_id: Filter by home or away team Reep ID.
+            date_from: Inclusive start date (``YYYY-MM-DD``).
+            date_to: Inclusive end date (``YYYY-MM-DD``).
+            status: Filter by lifecycle status (default ``"active"``).
+            limit: Maximum number of matches to return.
+            offset: Number of matches to skip.
+
+        Returns:
+            A list of match dictionaries.
+        """
+        if "matches" not in self._tables:
+            raise UnsupportedReleaseError(
+                "The local catalogue does not include the 'matches' table.",
+                hint="Run 'reep catalog sync --profile full' or use a shipped "
+                "reep-register-v1.duckdb file to query matches locally.",
             )
-            for owner, p, n, x, rung, upstream in self._query(
-                "SELECT reep_id, provider, namespace, external_id, nullif(rung, ''), "
-                "nullif(upstream_status, '') FROM bridges "
-                "WHERE reep_id IN (SELECT unnest($ids)) "
-                "ORDER BY provider, namespace, external_id, reep_id",
-                {"ids": sources},
-            )
+        conditions = ["1=1"]
+        params: dict[str, Any] = {"limit": limit, "offset": offset}
+        if status is not None:
+            conditions.append("m.status = $status")
+            params["status"] = status
+        if competition_id is not None:
+            conditions.append("m.competition_id = $comp")
+            params["comp"] = competition_id
+        if season_id is not None:
+            conditions.append("m.season_id = $season")
+            params["season"] = season_id
+        if team_id is not None:
+            conditions.append("(m.home_team_id = $team OR m.away_team_id = $team)")
+            params["team"] = team_id
+        if date_from is not None:
+            conditions.append("m.kickoff_date >= $date_from")
+            params["date_from"] = date_from
+        if date_to is not None:
+            conditions.append("m.kickoff_date <= $date_to")
+            params["date_to"] = date_to
+        sql = (
+            "SELECT m.reep_id, m.status, nullif(m.kickoff_date, ''), "
+            "nullif(m.competition_id, ''), nullif(m.season_id, ''), "
+            "nullif(m.home_team_id, ''), nullif(m.away_team_id, ''), "
+            "nullif(e.label, '') "
+            f"FROM matches m LEFT JOIN entities e USING (reep_id) "
+            f"WHERE {' AND '.join(conditions)} "
+            "ORDER BY m.kickoff_date, m.reep_id "
+            "LIMIT $limit OFFSET $offset"
         )
-        bridges = tuple(_unique_bridges(list(bridges), target))
-        aliases: tuple[str, ...] = ()
-        if "aliases" in self._tables:
-            aliases = tuple(
-                str(row[0])
-                for row in self._query(
-                    "SELECT alias FROM aliases WHERE reep_id = $id "
-                    "GROUP BY alias ORDER BY min(TRY_CAST(rank AS INTEGER)) "
-                    "NULLS LAST, alias",
-                    {"id": target},
-                )
-            )
-        return Entity(
-            reep_id=str(rid),
-            entity_type=str(etype),
-            status=str(status),
-            label=label,
-            gender=gender,
-            country=country,
-            corroboration_grade=grade,
-            corroboration_count=int(count) if count is not None else None,
-            bridges=bridges,
-            aliases=aliases,
-            redirected_from=reep_id if target != reep_id else None,
-            release_stamp=self.stamp,
-        )
+        rows = self._query(sql, params)
+        return [
+            {
+                "reep_id": str(rid),
+                "status": str(st),
+                "kickoff_date": kdate,
+                "competition_id": comp_id,
+                "season_id": seas_id,
+                "home_team_id": home_id,
+                "away_team_id": away_id,
+                "label": label,
+            }
+            for rid, st, kdate, comp_id, seas_id, home_id, away_id, label in rows
+        ]
 
     def search(
         self,
@@ -476,12 +616,12 @@ class LocalBackend:
             )
         ]
 
-    def _normalise(self, text: str) -> str:
-        row = self._query(
-            "SELECT trim(regexp_replace(strip_accents(lower($t)), '\\s+', ' ', 'g'))",
-            {"t": text},
-        )
-        return str(row[0][0]) if row and row[0][0] is not None else ""
+    @staticmethod
+    def _normalise(text: str) -> str:
+        folded = text.lower().translate(_STRIP_ACCENTS_TABLE)
+        decomposed = unicodedata.normalize("NFD", folded)
+        stripped = "".join(c for c in decomposed if unicodedata.category(c) != "Mn")
+        return " ".join(stripped.split())
 
     def _states(self, reep_ids: set[str]) -> dict[str, IdState]:
         """Return the state of each ID, following merge redirects to the survivor."""

@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from reep._version import USER_AGENT
+from reep.backends import _matches
 from reep.backends.base import resolution_from_states
 from reep.config import DEFAULT_API_URL
 from reep.errors import (
@@ -131,6 +132,7 @@ class ApiBackend:
         self._expiry_warning_days = expiry_warning_days
         self._warned = False
         self._etags: dict[str, tuple[str, Any]] = {}
+        self._api_metadata: dict[str, str | None] = {}
         self.release_stamp: str | None = None
         self.key_expires_at: str | None = None
         self.key_days_remaining: int | None = None
@@ -150,6 +152,7 @@ class ApiBackend:
             "ratelimit_remaining": self.ratelimit_remaining,
             "ratelimit_reset": self.ratelimit_reset,
             "plan": self.plan,
+            "api_metadata": dict(self._api_metadata),
         }
 
     def close(self) -> None:
@@ -275,25 +278,112 @@ class ApiBackend:
         limit: int = 50,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
-        """Query match fixtures (``GET /matches``)."""
-        params = {
-            "season": season_id,
-            "competition": competition_id,
-            "team": team_id,
-            "home_team": home_team_id,
-            "away_team": away_team_id,
-            "venue": venue_id,
-            "date": date,
-            "date_from": date_from,
-            "date_to": date_to,
-            "limit": str(limit),
-            "offset": str(offset) if offset else None,
-        }
-        body = self._get_json("/matches", {k: v for k, v in params.items() if v})
-        results = body.get("results")
-        if not isinstance(results, list):
-            return []
-        return [r for r in results if isinstance(r, dict)]
+        """Return up to ``limit`` fixtures, skipping ``offset`` on one API generation.
+
+        Offset traversal can make several requests. If the API advances while
+        paging, raise ``ApiError`` rather than combine generations or restart.
+        Use :meth:`matches_page` to retain unresolved anchors and page metadata.
+        """
+        _matches.positive_int(limit, "limit")
+        _matches.positive_int(offset, "offset", zero=True)
+        params = _matches.parameters(
+            season_id=season_id,
+            competition_id=competition_id,
+            team_id=team_id,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+            venue_id=venue_id,
+            date=date,
+            date_from=date_from,
+            date_to=date_to,
+            limit=min(100, limit + offset),
+            cursor=None,
+        )
+        rows: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        seen_cursors: set[str] = set()
+        identity: tuple[object, ...] | None = None
+        skipped = 0
+        while True:
+            page = self._matches_page(params)
+            meta = page["api_metadata"]
+            # These are stable release/source fields from this response,
+            # not mutable credit/rate-limit telemetry.
+            current = (page["generation"], tuple(sorted(meta.items())))
+            if identity is not None and identity != current:
+                raise _matches.contract_error("API identity changed while paging")
+            identity = current
+            for row in page["matches"]:
+                if row["reep_id"] in seen_ids:
+                    raise _matches.contract_error("duplicate match across pages")
+                seen_ids.add(row["reep_id"])
+                if skipped < offset:
+                    skipped += 1
+                elif len(rows) < limit:
+                    rows.append(row)
+            cursor = page["next_cursor"]
+            if cursor is not None:
+                if cursor in seen_cursors:
+                    raise _matches.contract_error("repeated cursor")
+                seen_cursors.add(cursor)
+            if len(rows) == limit or cursor is None:
+                return rows
+            params["cursor"] = cursor
+
+    def matches_page(
+        self,
+        *,
+        season_id: str | None = None,
+        competition_id: str | None = None,
+        team_id: str | None = None,
+        home_team_id: str | None = None,
+        away_team_id: str | None = None,
+        venue_id: str | None = None,
+        date: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        """Return one validated API page with its cursor and generation.
+
+        The result retains ``matches``, ``count``, ``generation``, ``unresolved``
+        and ``next_cursor``. ``api_metadata`` is a snapshot of this response's
+        release, selection and source headers, with absent values set to None.
+        These describe the API channel, independently of downloadable snapshots.
+        Repeat exactly the same filters and limit when continuing a cursor.
+        A stale cursor raises ``ApiError`` with ``api_code='stale_cursor'``.
+
+        Existing SDK names are translated: ``date`` is an exact day,
+        ``date_from``/``date_to`` are inclusive, and home/away IDs select sides.
+        ``venue_id`` is unsupported by the remote API and raises explicitly.
+        """
+        params = _matches.parameters(
+            season_id=season_id,
+            competition_id=competition_id,
+            team_id=team_id,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+            venue_id=venue_id,
+            date=date,
+            date_from=date_from,
+            date_to=date_to,
+            limit=limit,
+            cursor=cursor,
+        )
+        return self._matches_page(params)
+
+    def _matches_page(self, params: dict[str, str]) -> dict[str, Any]:
+        response = self._request("GET", "/matches", params=params)
+        page = _matches.validate_page(self._json(response), int(params["limit"]))
+        if params.get("cursor") is not None and page["unresolved"]:
+            raise _matches.contract_error(
+                "resolved anchors became unresolved on continuation"
+            )
+        metadata = _match_metadata(response)
+        if metadata["channel"] not in (None, "api"):
+            raise _matches.contract_error("response is not from the API channel")
+        return {**page, "api_metadata": metadata}
 
     def notices(
         self,
@@ -953,6 +1043,9 @@ class ApiBackend:
         return float(self._backoff * (2**attempt))
 
     def _note_headers(self, response: httpx.Response) -> None:
+        # Each page carries only its own headers, never stale values from a
+        # previous generation or another channel.
+        self._api_metadata = _match_metadata(response)
         stamp = response.headers.get("X-Reep-Release-Stamp")
         if stamp:
             self.release_stamp = stamp
@@ -985,6 +1078,21 @@ class ApiBackend:
                     self.key_days_remaining,
                     expires or "unknown date",
                 )
+
+
+def _match_metadata(response: httpx.Response) -> dict[str, str | None]:
+    """Snapshot only this response; backend telemetry cannot bind a page."""
+    return {
+        key: response.headers.get(header)
+        for key, header in {
+            "release_stamp": "X-Reep-Release-Stamp",
+            "release_generated_at": "X-Reep-Release-Generated-At",
+            "selection": "X-Reep-Selection",
+            "channel": "X-Reep-Channel",
+            "source_generation": "X-Reep-Source-Generation",
+            "source_as_of": "X-Reep-Source-As-Of",
+        }.items()
+    }
 
 
 def _body(response: httpx.Response) -> dict[str, Any]:

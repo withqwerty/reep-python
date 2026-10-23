@@ -650,11 +650,18 @@ class Register:
         limit: int = 50,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
-        """Query match fixtures by season, competition, team, venue or date."""
-        fn = getattr(self._backend, "matches", None)
-        if fn is None:
-            raise InvalidArgumentError("This backend does not support matches().")
-        return fn(  # type: ignore[no-any-return]
+        """Return remote fixtures, retaining the list interface and offset.
+
+        Dates are inclusive. ``venue_id`` is unsupported; use home/away team IDs.
+        API pagination fails explicitly if its generation changes. For cursor,
+        unresolved-anchor and freshness metadata, use :meth:`matches_page`.
+        """
+        if not isinstance(self._backend, ApiBackend):
+            raise InvalidArgumentError(
+                "Register.matches() requires an API backend.",
+                hint="Use Register.api() for remote fixture queries.",
+            )
+        return self._backend.matches(
             season_id=season_id,
             competition_id=competition_id,
             team_id=team_id,
@@ -666,6 +673,43 @@ class Register:
             date_to=date_to,
             limit=limit,
             offset=offset,
+        )
+
+    def matches_page(
+        self,
+        *,
+        season_id: str | None = None,
+        competition_id: str | None = None,
+        team_id: str | None = None,
+        home_team_id: str | None = None,
+        away_team_id: str | None = None,
+        venue_id: str | None = None,
+        date: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        """Return a remote fixture page with generation, cursor and API metadata.
+
+        Pass the same filters and ``limit`` with ``next_cursor`` to continue.
+        The API may advance independently of downloads. Expired or invalidated
+        cursors raise ``ApiError``; no automatic restart combines generations.
+        """
+        if not isinstance(self._backend, ApiBackend):
+            raise InvalidArgumentError("matches_page() requires an API backend.")
+        return self._backend.matches_page(
+            season_id=season_id,
+            competition_id=competition_id,
+            team_id=team_id,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+            venue_id=venue_id,
+            date=date,
+            date_from=date_from,
+            date_to=date_to,
+            limit=limit,
+            cursor=cursor,
         )
 
     def changes(

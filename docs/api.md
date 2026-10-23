@@ -10,6 +10,44 @@ policy in the changelog.
    :members:
 ```
 
+### Remote match pages
+
+`Register.api().matches()` retains its list return type and keyword arguments.
+`date` selects an exact day; `date_from` and `date_to` are inclusive bounds.
+`home_team_id` and `away_team_id` select the respective sides. The hosted API
+requires a team, competition or season anchor. It does not support a stadium
+`venue_id` filter; this raises `InvalidArgumentError`, as do conflicting filters.
+Without a season or explicit date bounds, the API uses its last 30 days.
+
+Use `matches_page()` to retain pagination and provenance:
+
+```python
+reg = reep.Register.api()
+query = {"team_id": "rt00000000000000", "season_id": "rs00000000000001", "limit": 50}
+page = reg.matches_page(**query)
+# Persist page["generation"] and page["api_metadata"] with these results.
+while page["next_cursor"] is not None:
+    page = reg.matches_page(**query, cursor=page["next_cursor"])
+```
+
+IDs above are illustrative. Pass the same filters and limit on every continuation.
+Each page includes `matches`, `count` (this page only), `generation`, `unresolved`
+and `next_cursor`. `api_metadata` snapshots that response's `release_stamp`,
+`release_generated_at`, `selection`, `channel`, `source_generation` and
+`source_as_of`. Absent headers remain `None`; preparation time does not establish
+source freshness. Match rows retain nullable facts and their own generation.
+
+The API can advance hourly while downloads publish less often. These are separate
+channels; a newer API version does not invalidate a local snapshot. A stale or
+expired cursor raises `ApiError` with `api_code="stale_cursor"`; start a new query
+explicitly and keep its results separate. The list method implements `offset` by
+walking pages, which can cost several API requests, and refuses mixed identities.
+Malformed successful responses raise `ApiError` with
+`api_code="invalid_match_response"`; they are not empty search results.
+
+These methods are remote-only. They do not claim catalogue/download compatibility
+or change the separate local backend's table contract.
+
 ## Catalogue
 
 ```{eval-rst}

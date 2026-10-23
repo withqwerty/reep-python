@@ -1,0 +1,719 @@
+{
+  "provenance": "Tiny local WIT-3621 v4 export/compiler fixture; synthetic identities, not production qualification.",
+  "original_generation": "0f02ad989e802db03f3ac1f86afcdc462ec61e528892f123489df780489a2386",
+  "files": {
+    "aliases/rm00.json": {
+      "aliases_by_entity": {
+        "rm00000000000001": []
+      }
+    },
+    "aliases/rs00.json": {
+      "aliases_by_entity": {
+        "rs00000000000001": []
+      }
+    },
+    "aliases/rt00.json": {
+      "aliases_by_entity": {
+        "rt00000000000000": [],
+        "rt00000000000001": []
+      }
+    },
+    "attributes/rm00.json": {
+      "attributes_by_entity": {
+        "rm00000000000001": {}
+      }
+    },
+    "attributes/rs00.json": {
+      "attributes_by_entity": {
+        "rs00000000000001": {}
+      }
+    },
+    "attributes/rt00.json": {
+      "attributes_by_entity": {
+        "rt00000000000000": {},
+        "rt00000000000001": {}
+      }
+    },
+    "bridges/rm00.json": {
+      "bridges_by_entity": {
+        "rm00000000000001": [
+          {
+            "reep_id": "rm00000000000001",
+            "provider": "opta",
+            "namespace": "match",
+            "external_id": "rm00000000000001",
+            "entity_type": "match",
+            "role": "canonical_bridge"
+          },
+          {
+            "reep_id": "rm00000000000001",
+            "provider": "transfermarkt",
+            "namespace": "spielbericht",
+            "external_id": "rm00000000000001",
+            "entity_type": "match",
+            "role": "canonical_bridge"
+          }
+        ]
+      },
+      "overlay_by_entity": {}
+    },
+    "bridges/rs00.json": {
+      "bridges_by_entity": {
+        "rs00000000000001": [
+          {
+            "reep_id": "rs00000000000001",
+            "provider": "opta",
+            "namespace": "season",
+            "external_id": "rs00000000000001",
+            "entity_type": "season",
+            "role": "canonical_bridge"
+          },
+          {
+            "reep_id": "rs00000000000001",
+            "provider": "transfermarkt",
+            "namespace": "saison",
+            "external_id": "rs00000000000001",
+            "entity_type": "season",
+            "role": "canonical_bridge"
+          }
+        ]
+      },
+      "overlay_by_entity": {}
+    },
+    "bridges/rt00.json": {
+      "bridges_by_entity": {
+        "rt00000000000000": [
+          {
+            "reep_id": "rt00000000000000",
+            "provider": "opta",
+            "namespace": "team",
+            "external_id": "0000",
+            "entity_type": "team",
+            "role": "canonical_bridge"
+          },
+          {
+            "reep_id": "rt00000000000000",
+            "provider": "transfermarkt",
+            "namespace": "verein",
+            "external_id": "0000",
+            "entity_type": "team",
+            "role": "canonical_bridge"
+          }
+        ],
+        "rt00000000000001": [
+          {
+            "reep_id": "rt00000000000001",
+            "provider": "opta",
+            "namespace": "team",
+            "external_id": "0001",
+            "entity_type": "team",
+            "role": "canonical_bridge"
+          },
+          {
+            "reep_id": "rt00000000000001",
+            "provider": "transfermarkt",
+            "namespace": "verein",
+            "external_id": "0001",
+            "entity_type": "team",
+            "role": "canonical_bridge"
+          }
+        ]
+      },
+      "overlay_by_entity": {}
+    },
+    "entities/rm00.json": {
+      "entities": {
+        "rm00000000000001": {
+          "reep_id": "rm00000000000001",
+          "entity_type": "match",
+          "name_en": "Display name 1999-01-01",
+          "lifecycle_state": "active",
+          "canonical_reep_id": "rm00000000000001",
+          "gender": "men",
+          "country": "England",
+          "corroboration_grade": "A",
+          "corroboration_count": 2,
+          "match": {
+            "home_score": 0,
+            "away_score": 0,
+            "home_id": "rt00000000000000",
+            "away_id": "rt00000000000001",
+            "played_on": "2026-10-23"
+          }
+        }
+      }
+    },
+    "entities/rs00.json": {
+      "entities": {
+        "rs00000000000001": {
+          "reep_id": "rs00000000000001",
+          "entity_type": "season",
+          "name_en": "Display name 1999-01-01",
+          "lifecycle_state": "active",
+          "canonical_reep_id": "rs00000000000001",
+          "gender": "men",
+          "country": "England",
+          "corroboration_grade": "A",
+          "corroboration_count": 2
+        }
+      }
+    },
+    "entities/rt00.json": {
+      "entities": {
+        "rt00000000000000": {
+          "reep_id": "rt00000000000000",
+          "entity_type": "team",
+          "name_en": "Example 0",
+          "lifecycle_state": "active",
+          "canonical_reep_id": "rt00000000000000",
+          "gender": "men",
+          "country": "England",
+          "corroboration_grade": "A",
+          "corroboration_count": 2
+        },
+        "rt00000000000001": {
+          "reep_id": "rt00000000000001",
+          "entity_type": "team",
+          "name_en": "Example 1",
+          "lifecycle_state": "active",
+          "canonical_reep_id": "rt00000000000001",
+          "gender": "men",
+          "country": "England",
+          "corroboration_grade": "A",
+          "corroboration_count": 2
+        }
+      }
+    },
+    "manifest.json": {
+      "schema_version": 3,
+      "api_schema": "public-bridge-register-v2",
+      "capabilities": {
+        "match_details": "typed_date_teams_scores",
+        "match_state": "unavailable",
+        "score_extras": "unavailable",
+        "changes": "unavailable",
+        "notices": "unavailable",
+        "provider_notices": "unavailable"
+      },
+      "generated_at": "2026-10-23T13:12:06.470312+00:00",
+      "release": {
+        "stamp": "2026-10-23.1",
+        "generated_at": "2026-10-23T13:12:06.470312+00:00",
+        "schema_version": "reep-public-bundle/v4",
+        "tier": "public_bridge_v1",
+        "publishable": false,
+        "source_manifest_sha256": "6c14dd2d610d6c40457057b1cd147461b0939d02d9b2382d796dd65f54f0c459"
+      },
+      "counts": {
+        "entities": 4,
+        "by_entity_type": {
+          "match": 1,
+          "season": 1,
+          "team": 2
+        },
+        "bridges": 8,
+        "aliases": 0,
+        "overlay_links": 0,
+        "overlay_aliases": 0,
+        "relationship_observations": 0,
+        "redirects": 0,
+        "match_scorelines": 1
+      },
+      "search": {
+        "mode": "bounded-token-v1",
+        "max_candidates_per_token": 500,
+        "shards": 5,
+        "tokens": 5,
+        "candidates": 10
+      },
+      "shards": {
+        "entities": 3,
+        "aliases": 3,
+        "attributes": 3,
+        "bridges": 3,
+        "relationships": 3,
+        "redirects": 0,
+        "resolve": 16,
+        "search": 5
+      },
+      "providers": {
+        "opta": {
+          "bridge_count": 4,
+          "overlay_count": 0,
+          "entity_types": {
+            "match": 1,
+            "season": 1,
+            "team": 2
+          },
+          "namespaces": {
+            "match": 1,
+            "season": 1,
+            "team": 2
+          },
+          "role": "canonical_bridge"
+        },
+        "transfermarkt": {
+          "bridge_count": 4,
+          "overlay_count": 0,
+          "entity_types": {
+            "match": 1,
+            "season": 1,
+            "team": 2
+          },
+          "namespaces": {
+            "spielbericht": 1,
+            "saison": 1,
+            "verein": 2
+          },
+          "role": "canonical_bridge"
+        }
+      },
+      "provider_roles": {
+        "canonical_bridge": "Provider bridges in the public register contract.",
+        "bridge_only": "Bridge-only provider IDs; not mint-tier corroboration.",
+        "overlay_only": "Convenience overlay data, never canonical bridge or identity evidence."
+      },
+      "smoke_sample": {
+        "entity_id": "rm00000000000001",
+        "bridge": {
+          "reep_id": "rm00000000000001",
+          "provider": "opta",
+          "namespace": "match",
+          "external_id": "rm00000000000001",
+          "entity_type": "match",
+          "role": "canonical_bridge"
+        }
+      },
+      "search_sample": {
+        "token": "display",
+        "entity_id": "rm00000000000001",
+        "bucket": "fb"
+      },
+      "overlay_sample": null,
+      "redirect_sample": null,
+      "scoreline_samples": [
+        {
+          "form": null,
+          "entity_id": "rm00000000000001"
+        }
+      ],
+      "scoreline_columns": [
+        "home_score",
+        "away_score",
+        "result_form",
+        "shootout_home",
+        "shootout_away",
+        "score_basis",
+        "home_id",
+        "away_id",
+        "played_on"
+      ]
+    },
+    "matches/structure-summary.json": {
+      "matches": 1,
+      "ambiguous_stage": 0,
+      "ambiguous_season": 0,
+      "ambiguous_competition": 0
+    },
+    "matches/teams/168/2026.json": {
+      "matches": [
+        {
+          "reep_id": "rm00000000000001",
+          "state": null,
+          "home": {
+            "reep_id": "rt00000000000000",
+            "label": "Example 0"
+          },
+          "away": {
+            "reep_id": "rt00000000000001",
+            "label": "Example 1"
+          },
+          "competition": null,
+          "season": {
+            "reep_id": "rs00000000000001",
+            "label": "Display name 1999-01-01"
+          },
+          "stage": null,
+          "home_score": 0,
+          "away_score": 0,
+          "result_form": null,
+          "shootout_home": null,
+          "shootout_away": null,
+          "score_basis": null,
+          "played_on": "2026-10-23",
+          "leg": null,
+          "aggregate_of": null,
+          "bridges": [
+            {
+              "provider": "opta",
+              "namespace": "match",
+              "external_id": "rm00000000000001"
+            },
+            {
+              "provider": "transfermarkt",
+              "namespace": "spielbericht",
+              "external_id": "rm00000000000001"
+            }
+          ]
+        }
+      ]
+    },
+    "matches/teams/2fb/2026.json": {
+      "matches": [
+        {
+          "reep_id": "rm00000000000001",
+          "state": null,
+          "home": {
+            "reep_id": "rt00000000000000",
+            "label": "Example 0"
+          },
+          "away": {
+            "reep_id": "rt00000000000001",
+            "label": "Example 1"
+          },
+          "competition": null,
+          "season": {
+            "reep_id": "rs00000000000001",
+            "label": "Display name 1999-01-01"
+          },
+          "stage": null,
+          "home_score": 0,
+          "away_score": 0,
+          "result_form": null,
+          "shootout_home": null,
+          "shootout_away": null,
+          "score_basis": null,
+          "played_on": "2026-10-23",
+          "leg": null,
+          "aggregate_of": null,
+          "bridges": [
+            {
+              "provider": "opta",
+              "namespace": "match",
+              "external_id": "rm00000000000001"
+            },
+            {
+              "provider": "transfermarkt",
+              "namespace": "spielbericht",
+              "external_id": "rm00000000000001"
+            }
+          ]
+        }
+      ]
+    },
+    "relationships/rm00.json": {
+      "relationships_by_entity": {
+        "rm00000000000001": {}
+      }
+    },
+    "relationships/rs00.json": {
+      "relationships_by_entity": {
+        "rs00000000000001": {}
+      }
+    },
+    "relationships/rt00.json": {
+      "relationships_by_entity": {
+        "rt00000000000000": {},
+        "rt00000000000001": {}
+      }
+    },
+    "resolve/01.json": {
+      "resolve_index": {
+        "opta\tteam\t0001": [
+          {
+            "reep_id": "rt00000000000001",
+            "entity_type": "team"
+          }
+        ]
+      }
+    },
+    "resolve/06.json": {
+      "resolve_index": {
+        "opta\t\t0001": [
+          {
+            "reep_id": "rt00000000000001",
+            "entity_type": "team",
+            "namespace": "team"
+          }
+        ]
+      }
+    },
+    "resolve/11.json": {
+      "resolve_index": {
+        "transfermarkt\t\t0000": [
+          {
+            "reep_id": "rt00000000000000",
+            "entity_type": "team",
+            "namespace": "verein"
+          }
+        ]
+      }
+    },
+    "resolve/17.json": {
+      "resolve_index": {
+        "opta\t\trm00000000000001": [
+          {
+            "reep_id": "rm00000000000001",
+            "entity_type": "match",
+            "namespace": "match"
+          }
+        ]
+      }
+    },
+    "resolve/2e.json": {
+      "resolve_index": {
+        "opta\tseason\trs00000000000001": [
+          {
+            "reep_id": "rs00000000000001",
+            "entity_type": "season"
+          }
+        ]
+      }
+    },
+    "resolve/48.json": {
+      "resolve_index": {
+        "transfermarkt\tverein\t0000": [
+          {
+            "reep_id": "rt00000000000000",
+            "entity_type": "team"
+          }
+        ]
+      }
+    },
+    "resolve/6a.json": {
+      "resolve_index": {
+        "transfermarkt\tsaison\trs00000000000001": [
+          {
+            "reep_id": "rs00000000000001",
+            "entity_type": "season"
+          }
+        ]
+      }
+    },
+    "resolve/6e.json": {
+      "resolve_index": {
+        "opta\tteam\t0000": [
+          {
+            "reep_id": "rt00000000000000",
+            "entity_type": "team"
+          }
+        ]
+      }
+    },
+    "resolve/71.json": {
+      "resolve_index": {
+        "transfermarkt\t\trs00000000000001": [
+          {
+            "reep_id": "rs00000000000001",
+            "entity_type": "season",
+            "namespace": "saison"
+          }
+        ]
+      }
+    },
+    "resolve/7a.json": {
+      "resolve_index": {
+        "opta\tmatch\trm00000000000001": [
+          {
+            "reep_id": "rm00000000000001",
+            "entity_type": "match"
+          }
+        ]
+      }
+    },
+    "resolve/7e.json": {
+      "resolve_index": {
+        "transfermarkt\t\t0001": [
+          {
+            "reep_id": "rt00000000000001",
+            "entity_type": "team",
+            "namespace": "verein"
+          }
+        ]
+      }
+    },
+    "resolve/99.json": {
+      "resolve_index": {
+        "opta\t\t0000": [
+          {
+            "reep_id": "rt00000000000000",
+            "entity_type": "team",
+            "namespace": "team"
+          }
+        ]
+      }
+    },
+    "resolve/c3.json": {
+      "resolve_index": {
+        "transfermarkt\tspielbericht\trm00000000000001": [
+          {
+            "reep_id": "rm00000000000001",
+            "entity_type": "match"
+          }
+        ]
+      }
+    },
+    "resolve/d9.json": {
+      "resolve_index": {
+        "opta\t\trs00000000000001": [
+          {
+            "reep_id": "rs00000000000001",
+            "entity_type": "season",
+            "namespace": "season"
+          }
+        ]
+      }
+    },
+    "resolve/db.json": {
+      "resolve_index": {
+        "transfermarkt\tverein\t0001": [
+          {
+            "reep_id": "rt00000000000001",
+            "entity_type": "team"
+          }
+        ]
+      }
+    },
+    "resolve/df.json": {
+      "resolve_index": {
+        "transfermarkt\t\trm00000000000001": [
+          {
+            "reep_id": "rm00000000000001",
+            "entity_type": "match",
+            "namespace": "spielbericht"
+          }
+        ]
+      }
+    },
+    "search/07.json": {
+      "search_index": {
+        "1999": [
+          [
+            "rm00000000000001",
+            "match",
+            "Display name 1999-01-01",
+            2,
+            0,
+            "active",
+            "men",
+            "England"
+          ],
+          [
+            "rs00000000000001",
+            "season",
+            "Display name 1999-01-01",
+            2,
+            0,
+            "active",
+            "men",
+            "England"
+          ]
+        ]
+      }
+    },
+    "search/30.json": {
+      "search_index": {
+        "name": [
+          [
+            "rm00000000000001",
+            "match",
+            "Display name 1999-01-01",
+            2,
+            0,
+            "active",
+            "men",
+            "England"
+          ],
+          [
+            "rs00000000000001",
+            "season",
+            "Display name 1999-01-01",
+            2,
+            0,
+            "active",
+            "men",
+            "England"
+          ]
+        ]
+      }
+    },
+    "search/70.json": {
+      "search_index": {
+        "01": [
+          [
+            "rm00000000000001",
+            "match",
+            "Display name 1999-01-01",
+            2,
+            0,
+            "active",
+            "men",
+            "England"
+          ],
+          [
+            "rs00000000000001",
+            "season",
+            "Display name 1999-01-01",
+            2,
+            0,
+            "active",
+            "men",
+            "England"
+          ]
+        ]
+      }
+    },
+    "search/ab.json": {
+      "search_index": {
+        "example": [
+          [
+            "rt00000000000000",
+            "team",
+            "Example 0",
+            2,
+            0,
+            "active",
+            "men",
+            "England"
+          ],
+          [
+            "rt00000000000001",
+            "team",
+            "Example 1",
+            2,
+            0,
+            "active",
+            "men",
+            "England"
+          ]
+        ]
+      }
+    },
+    "search/fb.json": {
+      "search_index": {
+        "display": [
+          [
+            "rm00000000000001",
+            "match",
+            "Display name 1999-01-01",
+            2,
+            0,
+            "active",
+            "men",
+            "England"
+          ],
+          [
+            "rs00000000000001",
+            "season",
+            "Display name 1999-01-01",
+            2,
+            0,
+            "active",
+            "men",
+            "England"
+          ]
+        ]
+      }
+    }
+  }
+}

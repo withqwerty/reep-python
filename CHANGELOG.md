@@ -7,6 +7,19 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Remote `Register.matches()` now reads the real API match envelope and translates
+  date and home/away filters. Offset traversal follows generation-bound cursors;
+  malformed pages and stale cursors raise errors instead of returning false misses.
+  Stadium `venue_id` filters are explicitly unsupported by the hosted API.
+
+### Added
+
+- `Register.matches_page()` returns a validated match page with its cursor,
+  unresolved anchors, generation and per-response API provenance. API freshness
+  remains independent of local downloadable snapshots.
+
 ## [0.2.0] - 2026-10-17
 
 ### Added

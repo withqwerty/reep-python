@@ -100,7 +100,7 @@ def test_valid_reep_ids(value: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "value", ["rx53af22bbeaa667", "rp53af22bbeaa66", "RP53AF22BBEAA667", "568177", 5]
+    "value", ["rz53af22bbeaa667", "rp53af22bbeaa66", "RP53AF22BBEAA667", "568177", 5]
 )
 def test_invalid_reep_ids(value: object) -> None:
     with pytest.raises(InvalidReepIdError):

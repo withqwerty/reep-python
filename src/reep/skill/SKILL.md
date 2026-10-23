@@ -78,8 +78,10 @@ Show an entity with its label and all its provider IDs:
 reep show rp53af22bbeaa667 --json
 ```
 
-Check a stored Reep ID. `data.status` is `active`, `retired`, `redirected` (store
-`data.current_id`), `withdrawn` (do not use the ID) or `unknown`:
+Check a stored Reep ID. `data.status` is `active`, `retired`, `published` (present in
+a v4 download; lifecycle unreported), `redirected` (store `data.current_id`),
+`withdrawn` (do not use the ID) or `unknown`. A v4 entity's lifecycle and upstream
+status remain null; `published` does not mean active:
 
 ```bash
 reep current rp53af22bbeaa667 --json

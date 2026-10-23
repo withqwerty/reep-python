@@ -128,7 +128,12 @@ def resolution_from_states(
     rid, rung, upstream = found[0]
     bridge = Bridge(provider_id=pid, reep_id=rid, rung=rung, upstream_status=upstream)
     state = states[rid]
-    if state.status not in (IdStatus.ACTIVE, IdStatus.RETIRED, IdStatus.REDIRECTED):
+    if state.status not in (
+        IdStatus.ACTIVE,
+        IdStatus.PUBLISHED,
+        IdStatus.RETIRED,
+        IdStatus.REDIRECTED,
+    ):
         # Withdrawn, or an ID the release does not publish (UNKNOWN): no current ID.
         reason = state.reason
         if state.status is IdStatus.UNKNOWN:

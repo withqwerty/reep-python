@@ -230,8 +230,8 @@ def create_server(
     def current(reep_id: str) -> dict[str, Any]:
         """Return the state of a stored Reep ID.
 
-        The status is active, retired, redirected (store current_id), withdrawn
-        (do not use the ID) or unknown.
+        The status is active, retired, published (present, lifecycle unreported),
+        redirected (store current_id), withdrawn (do not use the ID) or unknown.
 
         Args:
             reep_id: The Reep ID, for example "rp53af22bbeaa667".

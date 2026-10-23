@@ -11,7 +11,7 @@ import logging
 import unicodedata
 from typing import TYPE_CHECKING, Any
 
-from reep import _store
+from reep import _store, _v4, _v4_store
 from reep.backends.base import resolution_from_states
 from reep.errors import CatalogMissingError, UnsupportedReleaseError
 from reep.models import (
@@ -26,6 +26,7 @@ from reep.models import (
     ProviderNamespace,
     ReleaseInfo,
     Resolution,
+    entity_type_of,
 )
 
 if TYPE_CHECKING:
@@ -137,7 +138,47 @@ class LocalBackend:
                 hint="Point REEP_DUCKDB_PATH at a reep-register-v1.duckdb file.",
             )
         self._meta = _store.read_metadata(self._con)
+        self._v4 = self._meta.get(_store.META_SCHEMA) == _v4.SCHEMA
+        if not self._v4 and "canonical_name" in _store.table_columns(
+            self._con, "entities"
+        ):
+            try:
+                self._bind_shipped_v4()
+            except Exception:
+                self._con.close()
+                raise
         self._providers: list[ProviderNamespace] | None = None
+
+    def _bind_shipped_v4(self) -> None:
+        """Adapt an exact shipped layout in memory; never write to the release."""
+        if self._tables != set(_v4.TABLES):
+            raise UnsupportedReleaseError(
+                "Shipped v4 table inventory differs from its contract."
+            )
+        for table in sorted(self._tables):
+            _v4_store.validate_columns(table, _store.table_columns(self._con, table))
+        self._con.close()
+        import duckdb
+
+        self._con = duckdb.connect(":memory:")
+        path = str(self.path.resolve()).replace("'", "''")
+        self._con.execute(f"ATTACH '{path}' AS downloaded (READ_ONLY)")
+        for table in sorted(self._tables):
+            self._con.execute(
+                f"CREATE VIEW {table} AS "
+                + _v4_store.projection(table, f"downloaded.main.{table}")
+            )
+        _v4_store.check_content(self._con)
+        self._con.execute(
+            "CREATE VIEW aliases AS " + _v4_store.aliases_query(self._tables)
+        )
+        self._tables.add("aliases")
+        self._meta = {
+            _store.META_SCHEMA: _v4.SCHEMA,
+            "publication_identity": "unverified_local_file",
+            "lifecycle": "not_published",
+        }
+        self._v4 = True
 
     def close(self) -> None:
         """Close the DuckDB connection."""
@@ -190,6 +231,16 @@ class LocalBackend:
 
     def providers(self) -> list[ProviderNamespace]:
         """Return every ``(provider, namespace)`` pair with its bridge count."""
+        if self._providers is None and self._v4:
+            self._providers = [
+                ProviderNamespace(str(p), str(n), int(count), tuple(types))
+                for p, n, count, types in self._query(
+                    "SELECT b.provider,b.namespace,count(*),"
+                    "list_sort(list(DISTINCT e.entity_type)) "
+                    "FROM bridges b JOIN entities e USING(reep_id) "
+                    "GROUP BY b.provider,b.namespace ORDER BY b.provider,b.namespace"
+                )
+            ]
         if self._providers is None:
             rows = self._query(
                 "SELECT provider, namespace, count(*) AS n, "
@@ -331,7 +382,12 @@ class LocalBackend:
             if not frontier:
                 break
             following: dict[str, str] = {}
-            for src, dst in self._query(_MERGED_INTO, {"ids": sorted(frontier)}):
+            query = (
+                _MERGED_INTO.replace("r.reason = 'merged'", "r.to_id IS NOT NULL")
+                if self._v4
+                else _MERGED_INTO
+            )
+            for src, dst in self._query(query, {"ids": sorted(frontier)}):
                 src = str(src)
                 if src in done:
                     continue
@@ -380,7 +436,9 @@ class LocalBackend:
             ):
                 target = state.current_id
             target_by_req[rid] = target
-            if target_state(state, target) in _LIVE:
+            if target_state(state, target) in _LIVE or (
+                self._v4 and state.current_id == target
+            ):
                 live_targets.add(target)
 
         targets = sorted(set(target_by_req.values()))
@@ -446,7 +504,7 @@ class LocalBackend:
             out[req_id] = Entity(
                 reep_id=str(rid),
                 entity_type=str(etype),
-                status=str(status),
+                status=status,
                 label=label,
                 gender=gender,
                 country=country,
@@ -506,6 +564,11 @@ class LocalBackend:
                 hint="Run 'reep catalog sync --profile full' or use a shipped "
                 "reep-register-v1.duckdb file to query matches locally.",
             )
+        if self._v4 and (status is not None or competition_id is not None):
+            raise UnsupportedReleaseError(
+                "v4 downloads do not publish match lifecycle or competition IDs; "
+                "this filter is unavailable."
+            )
         conditions = ["1=1"]
         params: dict[str, Any] = {"limit": limit, "offset": offset}
         if status is not None:
@@ -537,16 +600,37 @@ class LocalBackend:
             "LIMIT $limit OFFSET $offset"
         )
         rows = self._query(sql, params)
+        if self._v4:
+            # Additional v4 facts retain integer zero versus missing values.
+            fact_rows = self._query(
+                "SELECT reep_id,home_score,away_score,"
+                "match_state,result_form,score_basis "
+                "FROM matches WHERE reep_id IN (SELECT unnest($ids))",
+                {"ids": [r[0] for r in rows]},
+            )
+            facts = {
+                str(r[0]): {
+                    "home_score": int(r[1]) if r[1] is not None else None,
+                    "away_score": int(r[2]) if r[2] is not None else None,
+                    "match_state": r[3],
+                    "result_form": r[4],
+                    "score_basis": r[5],
+                }
+                for r in fact_rows
+            }
+        else:
+            facts = {}
         return [
             {
                 "reep_id": str(rid),
-                "status": str(st),
+                "status": st,
                 "kickoff_date": kdate,
                 "competition_id": comp_id,
                 "season_id": seas_id,
                 "home_team_id": home_id,
                 "away_team_id": away_id,
                 "label": label,
+                **facts.get(str(rid), {}),
             }
             for rid, st, kdate, comp_id, seas_id, home_id, away_id, label in rows
         ]
@@ -646,7 +730,7 @@ class LocalBackend:
             pending = set()
             for rid, etype, status, label, to_id, reason in rows:
                 raw[str(rid)] = (etype, status, label, to_id, reason)
-                if reason == "merged" and to_id and to_id not in raw:
+                if (self._v4 or reason == "merged") and to_id and to_id not in raw:
                     pending.add(str(to_id))
         return raw
 
@@ -658,24 +742,30 @@ class LocalBackend:
         ],
         stamp: str | None,
     ) -> IdState:
-        etype_from_id = ENTITY_TYPE_BY_LETTER.get(rid[1])
+        try:
+            etype_from_id = entity_type_of(rid)
+        except ValueError:
+            etype_from_id = None
         etype, status, label, to_id, reason = raw.get(
             rid, (None, None, None, None, None)
         )
-        if reason == "merged" and to_id:
+        if (self._v4 or reason == "merged") and to_id:
             seen = {rid}
             current = to_id
             for _ in range(_MAX_REDIRECT_HOPS):
                 c_type, c_status, c_label, c_to, c_reason = raw.get(
                     current, (None, None, None, None, None)
                 )
-                if c_reason == "merged" and c_to:
+                if (self._v4 or c_reason == "merged") and c_to:
                     if current in seen or c_to in seen:
                         break  # a loop: no ID in it is current
                     seen.add(current)
                     current = c_to
                     continue
-                if c_reason in WITHDRAWN_REASONS or c_status not in _LIVE:
+                if (
+                    not self._v4
+                    and (c_reason in WITHDRAWN_REASONS or c_status not in _LIVE)
+                ) or (self._v4 and c_type is None):
                     # Withdrawn, unpublished, or redirected with no survivor.
                     return IdState(
                         reep_id=rid,
@@ -690,7 +780,7 @@ class LocalBackend:
                     status=IdStatus.REDIRECTED,
                     current_id=current,
                     current_status=c_status,
-                    reason="merged",
+                    reason=reason if self._v4 else "merged",
                     entity_type=c_type or etype_from_id,
                     label=c_label,
                     release_stamp=stamp,
@@ -701,6 +791,16 @@ class LocalBackend:
                 status=IdStatus.WITHDRAWN,
                 reason="redirect_loop",
                 entity_type=etype_from_id,
+                release_stamp=stamp,
+            )
+        if self._v4 and etype is not None:
+            return IdState(
+                reep_id=rid,
+                status=IdStatus.PUBLISHED,
+                current_id=rid,
+                current_status=None,
+                entity_type=etype,
+                label=label,
                 release_stamp=stamp,
             )
         if reason in WITHDRAWN_REASONS:

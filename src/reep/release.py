@@ -8,15 +8,16 @@ A release is a directory on the bucket: ``releases/<stamp>/``. The pointer
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, Self, TypeAlias
 
 import httpx
 
+from reep import _v4
 from reep._version import USER_AGENT
 from reep.config import DEFAULT_RELEASES_URL
 from reep.errors import (
@@ -41,14 +42,15 @@ __all__ = [
     "ReleaseManifest",
     "sha256_file",
     "validate_stamp",
+    "with_source_manifest",
 ]
 
 logger = logging.getLogger(__name__)
 
 #: Manifest versions that this version of reep can read.
-SUPPORTED_MANIFEST_VERSIONS = frozenset({1})
+SUPPORTED_MANIFEST_VERSIONS = frozenset({1, 4})
 #: Release schema versions that this version of reep can read.
-SUPPORTED_SCHEMA_VERSIONS = frozenset({"bridge-register-v1"})
+SUPPORTED_SCHEMA_VERSIONS = frozenset({"bridge-register-v1", _v4.SCHEMA})
 
 _LATEST_SCHEMA = "reep-public-release-latest-v1"
 _STAMP = re.compile(r"^\d{8}T\d{6}Z$")
@@ -73,10 +75,27 @@ def validate_stamp(stamp: str) -> str:
     Raises:
         ValueError: If the stamp has the wrong form.
     """
-    if not _STAMP.match(stamp):
-        msg = f"{stamp!r} is not a release stamp (expected the form 20261005T180536Z)."
-        raise ValueError(msg)
+    try:
+        if _STAMP.fullmatch(stamp):
+            datetime.strptime(stamp, "%Y%m%dT%H%M%SZ")
+        else:
+            _v4.stamp_order(stamp)
+    except (ValueError, TypeError) as exc:
+        raise ValueError(
+            f"{stamp!r} is not a release stamp "
+            "(expected 20261005T180536Z or 2026-10-23.1)."
+        ) from exc
     return stamp
+
+
+def _valid_legacy_stamp(value: object) -> bool:
+    if not isinstance(value, str) or not _STAMP.fullmatch(value):
+        return False
+    try:
+        datetime.strptime(value, "%Y%m%dT%H%M%SZ")
+    except ValueError:
+        return False
+    return True
 
 
 def sha256_file(path: Path) -> str:
@@ -110,6 +129,8 @@ class LatestPointer:
     manifest_key: str
     manifest_sha256: str
     generated_at: str | None = None
+    manifest_size: int | None = None
+    selection: dict[str, Any] | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +175,7 @@ class ReleaseManifest:
     tier: str | None
     files: Mapping[str, ReleaseFile]
     raw: Mapping[str, Any] = field(repr=False, compare=False)
+    identity_sha256: str | None = None
 
     @classmethod
     def from_json(cls, data: object) -> ReleaseManifest:
@@ -171,22 +193,40 @@ class ReleaseManifest:
         """
         if not isinstance(data, dict):
             raise UnsupportedReleaseError("release.json is not a JSON object.")
+        if data.get("schema") == _v4.SCHEMA:
+            parsed = _v4.descriptor(data)
+            return cls(
+                stamp=parsed["stamp"],
+                schema_version=_v4.SCHEMA,
+                manifest_version=4,
+                generated_at=parsed["generated_at"],
+                tier=None,
+                files={
+                    name: ReleaseFile(name, ref["key"], ref["sha256"], ref["bytes"])
+                    for name, ref in parsed["files"].items()
+                },
+                raw=parsed,
+            )
+        if "schema" in data:
+            raise UnsupportedReleaseError(
+                "Unsupported versioned release descriptor schema."
+            )
         manifest_version = data.get("manifest_version")
-        if manifest_version not in SUPPORTED_MANIFEST_VERSIONS:
+        if type(manifest_version) is not int or manifest_version != 1:
             raise UnsupportedReleaseError(
                 f"release.json has manifest_version {manifest_version!r}, which this "
                 "version of reep does not support.",
                 hint=_UPGRADE_HINT,
             )
         schema_version = data.get("schema_version")
-        if schema_version not in SUPPORTED_SCHEMA_VERSIONS:
+        if schema_version != "bridge-register-v1":
             raise UnsupportedReleaseError(
                 f"The release schema {schema_version!r} is not supported by this "
                 "version of reep.",
                 hint=_UPGRADE_HINT,
             )
         stamp = data.get("stamp")
-        if not isinstance(stamp, str) or not _STAMP.match(stamp):
+        if not _valid_legacy_stamp(stamp):
             raise UnsupportedReleaseError(
                 f"release.json has no valid stamp: {stamp!r}."
             )
@@ -195,11 +235,11 @@ class ReleaseManifest:
             raise UnsupportedReleaseError("release.json has no files object.")
         files: dict[str, ReleaseFile] = {}
         for name, entry in raw_files.items():
-            files[name] = _parse_file_entry(name, entry, stamp)
+            files[name] = _parse_file_entry(name, entry, str(stamp))
         generated_at = data.get("generated_at")
         tier = data.get("tier") or data.get("projection_mode")
         return cls(
-            stamp=stamp,
+            stamp=str(stamp),
             schema_version=schema_version,
             manifest_version=manifest_version,
             generated_at=generated_at if isinstance(generated_at, str) else None,
@@ -236,11 +276,14 @@ class ReleaseManifest:
         Returns:
             The entry, or ``None``.
         """
-        return self.files.get(f"csv/{table}.csv.gz")
+        prefix = "" if self.schema_version == _v4.SCHEMA else "csv/"
+        return self.files.get(f"{prefix}{table}.csv.gz")
 
     @property
     def tables(self) -> tuple[str, ...]:
         """Return the names of the CSV tables in the release."""
+        if self.schema_version == _v4.SCHEMA:
+            return tuple(sorted(_v4.TABLES))
         names = [
             name.removeprefix("csv/").removesuffix(".csv.gz")
             for name in self.files
@@ -256,7 +299,7 @@ def _parse_file_entry(name: str, entry: object, stamp: str) -> ReleaseFile:
     size = entry.get("bytes")
     if not isinstance(sha, str) or not _SHA256.match(sha):
         raise UnsupportedReleaseError(f"release.json entry {name!r} has no SHA-256.")
-    if not isinstance(size, int) or size < 0:
+    if type(size) is not int or size < 0:
         raise UnsupportedReleaseError(f"release.json entry {name!r} has no size.")
     object_key = entry.get("object_key")
     if not isinstance(object_key, str) or not object_key:
@@ -355,9 +398,27 @@ class ReleaseClient:
             NetworkError: If the request fails.
             UnsupportedReleaseError: If the pointer has an unexpected form.
         """
-        data = self._get_json("releases/latest.json")
+        data = _loads(
+            self._get_bytes("releases/latest.json", max_bytes=_v4.METADATA_LIMIT),
+            "latest.json",
+        )
         if not isinstance(data, dict):
             raise UnsupportedReleaseError("latest.json is not a JSON object.")
+        if data.get("schema") == _v4.SELECTOR:
+            selected = _v4.selection(data)
+            ref = selected["release"]
+            return LatestPointer(
+                selected["stamp"],
+                ref["key"],
+                ref["sha256"],
+                selected["generated_at"],
+                ref["bytes"],
+                selected,
+            )
+        if "schema" in data:
+            raise UnsupportedReleaseError(
+                "Unsupported versioned release selector schema."
+            )
         if data.get("schema_version") != _LATEST_SCHEMA:
             raise UnsupportedReleaseError(
                 f"latest.json has schema {data.get('schema_version')!r}, which this "
@@ -366,14 +427,14 @@ class ReleaseClient:
             )
         stamp = data.get("stamp")
         sha = data.get("manifest_sha256")
-        if not isinstance(stamp, str) or not _STAMP.match(stamp):
+        if not _valid_legacy_stamp(stamp):
             raise UnsupportedReleaseError("latest.json has no valid stamp.")
         if not isinstance(sha, str) or not _SHA256.match(sha):
             raise UnsupportedReleaseError("latest.json has no manifest checksum.")
         key = data.get("manifest_object_key")
         generated_at = data.get("generated_at")
         return LatestPointer(
-            stamp=stamp,
+            stamp=str(stamp),
             manifest_key=(
                 key
                 if isinstance(key, str) and key
@@ -399,9 +460,17 @@ class ReleaseClient:
             ChecksumMismatchError: If the manifest does not match ``latest.json``.
             UnsupportedReleaseError: If the manifest has an unknown version.
         """
+        pointer = None
         if stamp is None:
             pointer = self.latest()
-            body = self._get_bytes(pointer.manifest_key)
+            body = self._get_bytes(
+                pointer.manifest_key,
+                max_bytes=pointer.manifest_size or _v4.METADATA_LIMIT,
+            )
+            if pointer.manifest_size is not None and len(body) != pointer.manifest_size:
+                raise ChecksumMismatchError(
+                    "Release descriptor byte count differs from selection."
+                )
             actual = hashlib.sha256(body).hexdigest()
             if actual != pointer.manifest_sha256:
                 raise ChecksumMismatchError(
@@ -414,13 +483,29 @@ class ReleaseClient:
         else:
             validate_stamp(stamp)
             key = f"releases/{stamp}/release.json"
-            manifest = ReleaseManifest.from_json(_loads(self._get_bytes(key), key))
+            body = self._get_bytes(key, max_bytes=_v4.METADATA_LIMIT)
+            manifest = ReleaseManifest.from_json(_loads(body, key))
             expected_stamp = stamp
         if manifest.stamp != expected_stamp:
             raise UnsupportedReleaseError(
                 f"release.json names stamp {manifest.stamp}, expected {expected_stamp}."
             )
-        return manifest
+        if manifest.schema_version == _v4.SCHEMA:
+            parsed = _v4.descriptor(
+                dict(manifest.raw), pointer.selection if pointer else None
+            )
+            if pointer is not None and pointer.selection is None:
+                raise UnsupportedReleaseError(
+                    "A legacy pointer cannot select a v4 descriptor."
+                )
+            ref = parsed["files"]["manifest.json"]
+            raw = self._get_bytes(ref["key"], max_bytes=_v4.METADATA_LIMIT)
+            manifest = with_source_manifest(manifest, raw)
+        elif pointer is not None and pointer.selection is not None:
+            raise UnsupportedReleaseError(
+                "A v4 selector cannot select a legacy manifest."
+            )
+        return replace(manifest, identity_sha256=hashlib.sha256(body).hexdigest())
 
     def download(
         self,
@@ -447,7 +532,10 @@ class ReleaseClient:
             ChecksumMismatchError: If the file does not match the manifest.
         """
         if dest.exists():
-            if sha256_file(dest) == release_file.sha256:
+            if (
+                dest.stat().st_size == release_file.size
+                and sha256_file(dest) == release_file.sha256
+            ):
                 if progress:
                     progress(release_file.size, release_file.size)
                 return dest
@@ -531,6 +619,10 @@ class ReleaseClient:
             done = offset if response.status_code == 206 else 0
             with part.open(mode) as fh:
                 for chunk in response.iter_bytes():
+                    if done + len(chunk) > total:
+                        raise ChecksumMismatchError(
+                            "Download exceeds its declared byte count."
+                        )
                     fh.write(chunk)
                     done += len(chunk)
                     if progress:
@@ -538,21 +630,33 @@ class ReleaseClient:
         if done != total:
             raise httpx.ReadError(f"received {done} of {total} bytes")
 
-    def _get_bytes(self, object_key: str) -> bytes:
+    def _get_bytes(self, object_key: str, *, max_bytes: int | None = None) -> bytes:
         url = self.url(object_key)
         attempt = 0
         while True:
             try:
-                response = self._http.get(url)
-                if response.status_code == 404:
-                    raise NotFoundError(f"{url} does not exist on the release bucket.")
-                if response.status_code in _RETRY_STATUSES:
-                    raise _RetryableStatusError(response)
-                if response.status_code != 200:
-                    raise NetworkError(
-                        f"GET {url} returned HTTP {response.status_code}."
-                    )
-                return response.content
+                with self._http.stream("GET", url) as response:
+                    if response.status_code == 404:
+                        raise NotFoundError(
+                            f"{url} does not exist on the release bucket."
+                        )
+                    if response.status_code in _RETRY_STATUSES:
+                        raise _RetryableStatusError(response)
+                    if response.status_code != 200:
+                        raise NetworkError(
+                            f"GET {url} returned HTTP {response.status_code}."
+                        )
+                    content = bytearray()
+                    for chunk in response.iter_bytes():
+                        if (
+                            max_bytes is not None
+                            and len(content) + len(chunk) > max_bytes
+                        ):
+                            raise UnsupportedReleaseError(
+                                "Release metadata exceeds its byte bound."
+                            )
+                        content.extend(chunk)
+                    return bytes(content)
             except (httpx.TransportError, _RetryableStatusError) as exc:
                 if attempt >= self._retries:
                     raise NetworkError(
@@ -581,8 +685,18 @@ class _RetryableStatusError(Exception):
 
 
 def _loads(body: bytes, name: str) -> object:
-    try:
-        result: object = json.loads(body)
-    except ValueError as exc:
-        raise UnsupportedReleaseError(f"{name} is not valid JSON: {exc}") from exc
-    return result
+    return _v4.loads(body, name)
+
+
+def with_source_manifest(manifest: ReleaseManifest, raw: bytes) -> ReleaseManifest:
+    """Bind v4 row counts to its exact producer manifest; legacy is unchanged."""
+    counts = _v4.source_counts(raw, dict(manifest.raw))
+    return replace(
+        manifest,
+        files={
+            name: replace(entry, rows=counts[name.removesuffix(".csv.gz")])
+            if name.endswith(".csv.gz")
+            else entry
+            for name, entry in manifest.files.items()
+        },
+    )

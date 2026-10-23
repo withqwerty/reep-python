@@ -17,16 +17,15 @@ name search.
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import shutil
 import time
 import uuid
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
-from reep import _store, changelog
+from reep import _store, _v4, changelog
 from reep._version import __version__
 from reep.config import Settings
 from reep.errors import (
@@ -36,7 +35,13 @@ from reep.errors import (
     ReplayError,
     UnsupportedReleaseError,
 )
-from reep.release import ReleaseClient, ReleaseManifest, sha256_file, validate_stamp
+from reep.release import (
+    ReleaseClient,
+    ReleaseManifest,
+    sha256_file,
+    validate_stamp,
+    with_source_manifest,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -128,6 +133,8 @@ class CatalogState:
     built_at: str | None
     bridge_attributes_stamp: str | None
     import_fingerprint: str | None = None
+    schema_version: str | None = None
+    manifest_sha256: str | None = None
 
 
 def state(settings: Settings | None = None) -> CatalogState | None:
@@ -158,6 +165,8 @@ def state(settings: Settings | None = None) -> CatalogState | None:
         built_at=meta.get(_store.META_BUILT_AT),
         bridge_attributes_stamp=meta.get(_store.META_BRIDGE_ATTRS),
         import_fingerprint=meta.get(_store.META_IMPORT_FINGERPRINT),
+        schema_version=meta.get(_store.META_SCHEMA),
+        manifest_sha256=meta.get(_store.META_MANIFEST_HASH),
     )
 
 
@@ -207,6 +216,8 @@ def profile_tables(
             and (entry.role in _TABLE_ROLES or entry.role is None)
         ]
     tables = list(_store.SLIM_TABLES)
+    if with_aliases and manifest.schema_version == _v4.SCHEMA:
+        tables.extend(["provider_aliases", "overlay_aliases"])
     if with_aliases and manifest.table_file("aliases") is not None:
         tables.append("aliases")
     return tables
@@ -278,10 +289,17 @@ def sync(
     with _client(client, settings) as rc:
         manifest = rc.manifest(stamp)
         wanted = profile_tables(manifest, chosen_profile, with_aliases=aliases)
+        _check_existing_identity(before, manifest)
+        if method == "replay" and manifest.schema_version == _v4.SCHEMA:
+            raise ReplayError("v4 download replay is unavailable; use a snapshot.")
         if (
             not force
             and before is not None
             and before.stamp == manifest.stamp
+            and (
+                manifest.schema_version != _v4.SCHEMA
+                or before.manifest_sha256 == manifest.identity_sha256
+            )
             and before.profile == chosen_profile
             and set(wanted) <= set(before.tables)
         ):
@@ -354,6 +372,21 @@ def sync(
     )
 
 
+def _check_existing_identity(
+    before: CatalogState | None, manifest: ReleaseManifest
+) -> None:
+    """Preserve one immutable descriptor identity per observed release stamp."""
+    if (
+        before is not None
+        and before.stamp == manifest.stamp
+        and before.manifest_sha256 is not None
+        and before.manifest_sha256 != manifest.identity_sha256
+    ):
+        raise UnsupportedReleaseError(
+            "A release descriptor changed under the same stamp."
+        )
+
+
 def _replay_blocker(
     before: CatalogState | None,
     target: ReleaseManifest,
@@ -361,6 +394,10 @@ def _replay_blocker(
     wanted: list[str],
 ) -> str | None:
     """Return why a replay is not possible, or ``None`` when it is."""
+    if target.schema_version == _v4.SCHEMA:
+        return "v4 download replay is unavailable"
+    if before is not None and before.schema_version == _v4.SCHEMA:
+        return "replay cannot cross release schemas"
     if before is None:
         return "there is no local catalogue"
     if before.stamp is None:
@@ -425,9 +462,25 @@ def import_release(
     manifest: ReleaseManifest | None = None
     local_manifest = source / "release.json"
     if local_manifest.is_file():
-        manifest = ReleaseManifest.from_json(
-            json.loads(local_manifest.read_text(encoding="utf-8"))
-        )
+        if local_manifest.stat().st_size > _v4.METADATA_LIMIT:
+            raise UnsupportedReleaseError("Release descriptor exceeds metadata bound.")
+        body = local_manifest.read_bytes()
+        manifest = ReleaseManifest.from_json(_v4.loads(body, "release.json"))
+        manifest = replace(manifest, identity_sha256=hashlib.sha256(body).hexdigest())
+        if manifest.schema_version == _v4.SCHEMA:
+            if len(body) > _v4.METADATA_LIMIT:
+                raise UnsupportedReleaseError(
+                    "Release descriptor exceeds metadata bound."
+                )
+            raw_manifest = source / "manifest.json"
+            if (
+                not raw_manifest.is_file()
+                or raw_manifest.stat().st_size > _v4.METADATA_LIMIT
+            ):
+                raise UnsupportedReleaseError(
+                    "v4 import requires the bound manifest.json."
+                )
+            manifest = with_source_manifest(manifest, raw_manifest.read_bytes())
         if stamp is not None and manifest.stamp != stamp:
             raise ConfigError(
                 f"{local_manifest} is for release {manifest.stamp}, not {stamp}."
@@ -436,12 +489,16 @@ def import_release(
         validate_stamp(stamp)
         with _client(client, settings) as rc:
             manifest = rc.manifest(stamp)
+    if manifest is not None:
+        _check_existing_identity(before, manifest)
     files = _local_tables(source)
     if manifest is not None:
         wanted = [
             t
             for t in profile_tables(manifest, profile, with_aliases=with_aliases)
-            if t in files or t in _store.SLIM_TABLES
+            if manifest.schema_version == _v4.SCHEMA
+            or t in files
+            or t in _store.SLIM_TABLES
         ]
     else:
         wanted = list(_store.SLIM_TABLES)
@@ -465,7 +522,7 @@ def import_release(
                     f"Release {manifest.stamp} does not list {table}.csv.gz."
                 )
             actual = sha256_file(path)
-            if actual != entry.sha256:
+            if actual != entry.sha256 or path.stat().st_size != entry.size:
                 raise ChecksumMismatchError(
                     f"{path} does not match release {manifest.stamp} "
                     f"(SHA-256 {actual}, expected {entry.sha256}).",
@@ -489,7 +546,10 @@ def import_release(
             generated_at=manifest.generated_at if manifest else None,
             tier=manifest.tier if manifest else None,
             expected_rows=expected_rows,
-            extra_meta={_store.META_IMPORT_FINGERPRINT: local_fingerprint(source)},
+            extra_meta={
+                _store.META_IMPORT_FINGERPRINT: local_fingerprint(source),
+                **_manifest_metadata(manifest),
+            },
         ),
         settings.catalog_path,
     )
@@ -504,6 +564,28 @@ def import_release(
         seconds=time.monotonic() - started,
         notes=notes,
     )
+
+
+def _manifest_metadata(manifest: ReleaseManifest | None) -> dict[str, str]:
+    if manifest is None:
+        return {}
+    result = (
+        {_store.META_MANIFEST_HASH: manifest.identity_sha256}
+        if manifest.identity_sha256
+        else {}
+    )
+    if manifest.schema_version == _v4.SCHEMA:
+        source = manifest.raw["source"]
+        result.update(
+            {
+                "publication_channel": "downloads",
+                "source_generation_id": source["generation_id"],
+                "source_generation_manifest_sha256": source["manifest_sha256"],
+                "candidate_sha256": manifest.raw["candidate_sha256"],
+                "policy_sha256": manifest.raw["policy_sha256"],
+            }
+        )
+    return result
 
 
 def _snapshot(
@@ -544,6 +626,7 @@ def _snapshot(
             generated_at=manifest.generated_at,
             tier=manifest.tier,
             expected_rows=expected_rows,
+            extra_meta=_manifest_metadata(manifest),
         ),
         settings.catalog_path,
     )

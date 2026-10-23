@@ -12,11 +12,11 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from reep.models import (
-    ENTITY_TYPE_BY_LETTER,
     REEP_ID_PATTERN,
     IdStatus,
     ProviderId,
     ResolutionStatus,
+    entity_type_of,
 )
 
 if TYPE_CHECKING:
@@ -265,7 +265,7 @@ def read_cell(value: object) -> Cell:
 
 
 def _entity_type(reep_id: str) -> str:
-    return ENTITY_TYPE_BY_LETTER[reep_id[1]]
+    return entity_type_of(reep_id)
 
 
 _MISMATCH = object()
@@ -406,7 +406,12 @@ class Planner:
         state = states.get(stored) if stored else None
         stored_current: str | None = None
         if state is not None:
-            if state.status in (IdStatus.ACTIVE, IdStatus.RETIRED, IdStatus.REDIRECTED):
+            if state.status in (
+                IdStatus.ACTIVE,
+                IdStatus.PUBLISHED,
+                IdStatus.RETIRED,
+                IdStatus.REDIRECTED,
+            ):
                 stored_current = state.current_id
             elif state.status is IdStatus.WITHDRAWN and withdrawn is None:
                 withdrawn = f"{stored} is withdrawn ({state.reason})"
@@ -528,12 +533,16 @@ class Planner:
                 detail = f"{cell.text} is a {_entity_type(cell.text)}"
             elif ident.conflict:
                 outcome, detail = CONFLICT, ident.conflict
-            elif state.status is IdStatus.ACTIVE:
+            elif state.status in (IdStatus.ACTIVE, IdStatus.PUBLISHED):
                 outcome = UNCHANGED
             elif state.status is IdStatus.RETIRED:
                 outcome = RETIRED
             elif state.status is IdStatus.REDIRECTED and state.current_id:
-                detail = f"merged into {state.current_id}"
+                detail = (
+                    f"merged into {state.current_id}"
+                    if state.reason == "merged"
+                    else f"redirected to {state.current_id}"
+                )
                 if self.repair_redirected:
                     outcome = REPAIR
                     write = Write(target.column, row.pk, state.current_id, cell.raw)

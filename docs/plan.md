@@ -138,7 +138,9 @@ Rules for the API:
 
 - `ProviderId` requires all three parts. A bare integer or a two-part ID raises
   `InvalidProviderIdError` with the valid namespaces for that provider in the message.
-- Reep IDs are validated against `^r[cglmopst][0-9a-f]{14}$`.
+- Reep IDs accept declared `r` prefixes with 14 lowercase hex digits and retained
+  underscore prefixes with 16 digits; venue, transfer and award are included.
+  Historical stage uses `r_`, never an inferred `g_`.
 - Models are frozen dataclasses with `slots=True`. They have no runtime dependency on
   pydantic.
 - Every result carries the release stamp it came from.
@@ -174,6 +176,44 @@ October 2026). "full" loads every CSV table.
 
 Reasons outside this list stop the load with `UnsupportedReleaseError`, so that a new
 reason is handled on purpose and not by accident.
+
+### Versioned v4 download adapter (WIT-3625)
+
+The table above describes retained `bridge-register-v1` releases. V4 downloads use
+`reep-public-selection/v1` with `channel=downloads`, then the exact hash/byte-bound
+`reep-public-release/v4` descriptor. The descriptor lists immutable object keys
+and all public files. Its bound `manifest.json` supplies counts and corroborating
+checksums. An API selector, changed binding, unsupported schema or malformed table
+is an explicit error, never a fallback to another channel or an empty catalogue.
+`YYYY-MM-DD.<positive revision>` and legacy timestamp stamps are distinct families;
+API and download stamps/cadences need not agree. Same-stamp descriptor replacement
+is refused. Catalogue metadata retains descriptor and source generation identities.
+
+One store adapter maps equivalent v4 labels/grades/counts and preserves original
+columns. V4 publishes no entity lifecycle or provider retirement state. Therefore
+`IdStatus.PUBLISHED` means present, with `current_status=None`, `Entity.status=None`
+and `Resolution.entity_status=None`. It grants no activity or quality judgement.
+`Bridge.rung` and `Bridge.upstream_status` remain None rather than inferring them
+from rule IDs or missing fields. Redirect targets are followed with their actual
+reason, never relabelled as a merge. Invalid, cyclic or dangling chains refuse.
+Database-sync lookup outcomes can still be new/unchanged/resolved; they do not
+write an invented entity lifecycle. The CLI JSON schema and MCP expose the same
+additive published state and nullable entity status.
+
+Slim/full snapshots use flat `*.csv.gz` files. Alias-enabled slim includes provider
+and overlay names. Local v4 import requires its descriptor plus bound producer
+manifest; an unversioned candidate directory is not a published release. A shipped
+v4 DuckDB file is read-only and adapted in memory, with an unknown release stamp
+unless externally bound; it reports `publication_identity=unverified_local_file`.
+LocalBackend match reads retain zero/NULL scores and reject filters whose facts
+are absent. Register.matches remains the existing API-only method.
+
+V4 replay is explicitly unavailable pending a supported change feed: auto sync
+uses a complete snapshot, and explicit replay raises ReplayError. Retained legacy
+replay and its N-to-N+1 parity remain supported. The SDK parses publication
+references; it does not qualify or activate the underlying generation. Tests use
+actual exporter bytes and a clearly synthetic selector, with the actual site
+parser checked independently. Live CDN/authentication is a later deployment gate.
 
 ## 7. Agent contract (CLI and MCP)
 

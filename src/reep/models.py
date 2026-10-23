@@ -39,7 +39,9 @@ __all__ = [
 ]
 
 #: A Reep ID: ``r``, one entity-type letter, then 14 lower-case hex digits.
-REEP_ID_PATTERN = re.compile(r"^r[cglmopst][0-9a-f]{14}$")
+REEP_ID_PATTERN = re.compile(
+    r"^(?:r[acglmopstvx][0-9a-f]{14}|[aclmoprstvx]_[0-9a-f]{16})$"
+)
 
 #: The entity type that each Reep ID letter stands for.
 ENTITY_TYPE_BY_LETTER: dict[str, str] = {
@@ -51,6 +53,9 @@ ENTITY_TYPE_BY_LETTER: dict[str, str] = {
     "p": "player",
     "s": "season",
     "t": "team",
+    "v": "venue",
+    "x": "transfer",
+    "a": "award",
 }
 
 #: The entity types in the register.
@@ -63,6 +68,9 @@ ENTITY_TYPES: tuple[str, ...] = (
     "season",
     "stage",
     "match",
+    "venue",
+    "transfer",
+    "award",
 )
 
 #: Redirect reasons that withdraw an ID without naming a survivor.
@@ -110,7 +118,9 @@ def entity_type_of(reep_id: str) -> str:
     Returns:
         The entity type, for example ``"player"``.
     """
-    return ENTITY_TYPE_BY_LETTER[validate_reep_id(reep_id)[1]]
+    rid = validate_reep_id(reep_id)
+    letter = ("g" if rid[0] == "r" else rid[0]) if rid[1] == "_" else rid[1]
+    return ENTITY_TYPE_BY_LETTER[letter]
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,6 +251,8 @@ class IdStatus(enum.StrEnum):
 
     #: The ID is current.
     ACTIVE = "active"
+    #: Present in a v4 download; entity lifecycle is not published.
+    PUBLISHED = "published"
     #: The entity is retired; the ID is not reused.
     RETIRED = "retired"
     #: The ID merged into a survivor; use ``IdState.current_id``.
@@ -261,7 +273,8 @@ class Bridge:
         rung: The kind of agreement that attached the ID (for example
             ``"name-dob"``), or ``None`` when the release records no rung or the
             backend does not return it.
-        upstream_status: ``None`` for a live ID, ``"retired"`` when the provider
+        upstream_status: ``None`` when unreported (including all v4 downloads),
+            ``"retired"`` when the provider
             retired the ID in favour of another, or ``"removed"`` when the provider's
             newest complete registry no longer lists it.
     """
@@ -362,7 +375,8 @@ class Entity:
     Attributes:
         reep_id: The entity's Reep ID.
         entity_type: The entity type.
-        status: ``"active"``, ``"redirected"`` or ``"retired"``.
+        status: ``"active"``, ``"redirected"``, ``"retired"`` or ``None``
+            when unreported.
         label: The public label.
         gender: ``"men"``, ``"women"`` or ``None``.
         country: The country claim, or ``None``.
@@ -377,7 +391,7 @@ class Entity:
 
     reep_id: str
     entity_type: str
-    status: str
+    status: str | None
     label: str | None = None
     gender: str | None = None
     country: str | None = None

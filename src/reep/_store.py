@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 
 import duckdb
 
+from reep import _v4, _v4_store
 from reep._version import __version__
 from reep.errors import CatalogInUseError, UnsupportedReleaseError
 from reep.models import WITHDRAWN_REASONS
@@ -76,6 +77,7 @@ META_BRIDGE_ATTRS = "sdk_bridge_attributes_stamp"
 META_IMPORT_FINGERPRINT = "sdk_import_fingerprint"
 META_REPLAYED_FROM = "sdk_replayed_from"
 META_REPLAY_STEPS = "sdk_replay_steps"
+META_MANIFEST_HASH = "sdk_manifest_sha256"
 
 
 def connect(path: Path, *, read_only: bool) -> duckdb.DuckDBPyConnection:
@@ -148,8 +150,16 @@ def build_store(spec: StoreSpec, dest: Path) -> None:
             con.execute(f"SET temp_directory = '{_sql_text(str(dest.parent))}'")
             for table, path in spec.tables.items():
                 logger.info("Loading %s from %s", table, path.name)
-                load_table(con, table, path)
-            check_store(con, spec.expected_rows)
+                load_table(con, table, path, schema_version=spec.schema_version)
+            check_store(con, spec.expected_rows, schema_version=spec.schema_version)
+            if spec.schema_version == _v4.SCHEMA and {
+                "provider_aliases",
+                "overlay_aliases",
+            } & set(spec.tables):
+                con.execute(
+                    "CREATE TABLE aliases AS "
+                    + _v4_store.aliases_query(set(spec.tables))
+                )
             build_entity_search(con)
             write_metadata(
                 con,
@@ -163,7 +173,17 @@ def build_store(spec: StoreSpec, dest: Path) -> None:
                     META_PROFILE: spec.profile,
                     META_SOURCE: spec.source,
                     META_BUILT_AT: now_utc(),
-                    META_BRIDGE_ATTRS: spec.stamp,
+                    META_BRIDGE_ATTRS: None
+                    if spec.schema_version == _v4.SCHEMA
+                    else spec.stamp,
+                    **(
+                        {
+                            "lifecycle": "not_published",
+                            "upstream_status": "not_published",
+                        }
+                        if spec.schema_version == _v4.SCHEMA
+                        else {}
+                    ),
                     **spec.extra_meta,
                 },
             )
@@ -175,13 +195,20 @@ def build_store(spec: StoreSpec, dest: Path) -> None:
         remove_db_files(tmp)
 
 
-def load_table(con: duckdb.DuckDBPyConnection, table: str, path: Path) -> None:
+def load_table(
+    con: duckdb.DuckDBPyConnection,
+    table: str,
+    path: Path,
+    *,
+    schema_version: str | None = None,
+) -> None:
     """Load one gzip CSV file into a VARCHAR table.
 
     Args:
         con: An open writable connection.
         table: The table name.
         path: The CSV file.
+        schema_version: Explicit source layout; v4 uses its one versioned adapter.
 
     Raises:
         UnsupportedReleaseError: If a required column is missing.
@@ -191,6 +218,17 @@ def load_table(con: duckdb.DuckDBPyConnection, table: str, path: Path) -> None:
         f"DESCRIBE SELECT * FROM read_csv(?, {_CSV_OPTIONS})", [str(path)]
     ).fetchall()
     columns = [str(row[0]) for row in header]
+    if schema_version == _v4.SCHEMA:
+        _v4_store.validate_columns(table, columns)
+        relation = f"read_csv(?, {_CSV_OPTIONS})"
+        try:
+            con.execute(
+                f"CREATE TABLE {table} AS " + _v4_store.projection(table, relation),
+                [str(path)],
+            )
+        except duckdb.Error as exc:
+            raise UnsupportedReleaseError(f"Invalid v4 {table} CSV content.") from exc
+        return
     missing = [c for c in REQUIRED_COLUMNS.get(table, ()) if c not in columns]
     if missing:
         raise UnsupportedReleaseError(
@@ -211,13 +249,17 @@ def load_table(con: duckdb.DuckDBPyConnection, table: str, path: Path) -> None:
 
 
 def check_store(
-    con: duckdb.DuckDBPyConnection, expected_rows: Mapping[str, int]
+    con: duckdb.DuckDBPyConnection,
+    expected_rows: Mapping[str, int],
+    *,
+    schema_version: str | None = None,
 ) -> None:
     """Check row counts and the closed vocabularies that the SDK relies on.
 
     Args:
         con: An open connection.
         expected_rows: The row count of each table from the manifest.
+        schema_version: Explicit source layout; legacy remains the default.
 
     Raises:
         UnsupportedReleaseError: If a check fails.
@@ -233,6 +275,9 @@ def check_store(
                 f"{table} has {actual} rows, but the manifest lists {expected}.",
                 hint="The file may be damaged. Delete it and download it again.",
             )
+    if schema_version == _v4.SCHEMA:
+        _v4_store.check_content(con)
+        return
     reasons = {
         str(row[0])
         for row in con.execute(

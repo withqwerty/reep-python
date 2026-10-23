@@ -16,6 +16,19 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Versioned v4 downloads: the download selector and immutable descriptor are checked
+  independently of the API channel, including object hashes, lengths, inventory and
+  bound table counts. Slim/full catalogues and local imports support the declared
+  flat CSV layout; shipped v4 DuckDB files are adapted in memory and remain read-only.
+- `IdStatus.PUBLISHED` reports a present downloaded ID whose lifecycle is unreported.
+  `Entity.status` can now be `None`, as can resolution/current lifecycle fields.
+  Missing upstream status and legacy rung remain unknown. V4 redirect reasons are
+  preserved, and database sync handles published IDs without inventing lifecycle.
+- Declared venue/transfer/award IDs and historical underscore IDs are accepted;
+  unknown prefixes remain errors. CLI JSON schemas include these IDs and nullable
+  entity status. V4 catalogue updates use snapshots; explicit v4 replay raises
+  `ReplayError` until a supported change feed exists. Legacy replay is unchanged.
+
 - `Register.matches_page()` returns a validated match page with its cursor,
   unresolved anchors, generation and per-response API provenance. API freshness
   remains independent of local downloadable snapshots.

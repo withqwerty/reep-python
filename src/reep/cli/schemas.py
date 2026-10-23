@@ -6,15 +6,15 @@ from typing import Any
 
 from reep.cli.output import SCHEMA_VERSION
 from reep.dbsync._plan import OUTCOMES
-from reep.models import ENTITY_TYPES, IdStatus, ResolutionStatus
+from reep.models import ENTITY_TYPES, REEP_ID_PATTERN, IdStatus, ResolutionStatus
 
 __all__ = ["COMMANDS", "envelope_schema", "error_schema"]
 
 _STR = {"type": "string"}
 _OPT_STR = {"type": ["string", "null"]}
 _OPT_INT = {"type": ["integer", "null"]}
-_REEP_ID = {"type": "string", "pattern": "^r[cglmopst][0-9a-f]{14}$"}
-_OPT_REEP_ID = {"type": ["string", "null"], "pattern": "^r[cglmopst][0-9a-f]{14}$"}
+_REEP_ID = {"type": "string", "pattern": REEP_ID_PATTERN.pattern}
+_OPT_REEP_ID = {"type": ["string", "null"], "pattern": REEP_ID_PATTERN.pattern}
 
 
 def _object(
@@ -73,7 +73,7 @@ ENTITY = _object(
     {
         "reep_id": _REEP_ID,
         "entity_type": {"enum": list(ENTITY_TYPES)},
-        "status": _STR,
+        "status": _OPT_STR,
         "label": _OPT_STR,
         "gender": _OPT_STR,
         "country": _OPT_STR,

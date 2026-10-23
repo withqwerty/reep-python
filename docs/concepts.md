@@ -18,7 +18,8 @@ Run `reep providers --provider <name>` to list a provider's namespaces.
 
 ## Reep IDs
 
-A Reep ID is `r`, one entity-type letter and 14 hex digits, for example
+New Reep IDs use `r`, one declared entity-type letter and 14 hex digits; retained
+underscore-prefixed IDs have 16 hex digits. For example
 `rp53af22bbeaa667`. The letter gives the type:
 
 | Letter | Type | Letter | Type |

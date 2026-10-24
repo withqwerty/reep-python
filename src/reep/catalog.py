@@ -44,8 +44,9 @@ from reep.release import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Iterator, Mapping
     from pathlib import Path
+    from typing import Any
 
     import duckdb
 
@@ -59,6 +60,7 @@ __all__ = [
     "import_release",
     "local_fingerprint",
     "profile_tables",
+    "replay_change_feed",
     "state",
     "sync",
 ]
@@ -292,7 +294,15 @@ def sync(
         manifest = rc.manifest(stamp)
         wanted = profile_tables(manifest, chosen_profile, with_aliases=aliases)
         _check_existing_identity(before, manifest)
-        if method == "replay" and manifest.unpublished_lifecycle:
+        if (
+            method == "replay"
+            and manifest.unpublished_lifecycle
+            and (
+                before is None
+                or before.stamp == manifest.stamp
+                or manifest.schema_version != _v4.SCHEMA
+            )
+        ):
             raise ReplayError("v4 download replay is unavailable; use a snapshot.")
         if (
             not force
@@ -319,7 +329,10 @@ def sync(
             if blocker is not None and method == "replay":
                 raise ReplayError(f"Cannot replay: {blocker}.")
             if blocker is None and before is not None:
-                attempt = _Replay(
+                replay_cls = (
+                    _V4Replay if manifest.schema_version == _v4.SCHEMA else _Replay
+                )
+                attempt = replay_cls(
                     rc,
                     manifest,
                     before,
@@ -396,24 +409,29 @@ def _replay_blocker(
     wanted: list[str],
 ) -> str | None:
     """Return why a replay is not possible, or ``None`` when it is."""
-    if target.unpublished_lifecycle:
+    if target.layout == _historical_v4.LAYOUT:
         return "v4 download replay is unavailable"
-    if before is not None and (
-        before.schema_version == _v4.SCHEMA or before.layout == _historical_v4.LAYOUT
-    ):
-        return "replay cannot cross release schemas"
     if before is None:
         return "there is no local catalogue"
     if before.stamp is None:
         return "the local catalogue has no release stamp"
+    if (
+        before.schema_version != target.schema_version
+        or before.layout == _historical_v4.LAYOUT
+    ):
+        return "replay cannot cross release schemas"
     if before.source not in _SDK_SOURCES:
         return "the local catalogue was not built by the SDK"
     if before.profile != profile:
         return "the profile changed"
-    data_tables = set(before.tables) - _DERIVED_TABLES
+    derived = _DERIVED_TABLES | ({"aliases"} if target.unpublished_lifecycle else set())
+    data_tables = set(before.tables) - derived
     if set(wanted) != data_tables:
         return "the table set changed"
-    if target.stamp <= before.stamp:
+    if target.schema_version == _v4.SCHEMA:
+        if _v4.stamp_order(target.stamp) <= _v4.stamp_order(before.stamp):
+            return "the target release is not newer than the local catalogue"
+    elif target.stamp <= before.stamp:
         return "the target release is not newer than the local catalogue"
     if target.table_file("bridges") is None:
         return "the release has no bridges table"
@@ -652,6 +670,434 @@ def _snapshot(
     if not keep_downloads:
         shutil.rmtree(download_dir, ignore_errors=True)
     return downloaded
+
+
+def _apply_v4_change_feed_to_con(
+    con: duckdb.DuckDBPyConnection, feed: Mapping[str, Any]
+) -> None:
+    """Apply a v4 replayable change feed onto an open DuckDB store."""
+    status = str(feed.get("status") or "")
+    if status == "unavailable":
+        reason = str(feed.get("reason") or "missing_prior_baseline")
+        raise ReplayError(f"v4 download replay is unavailable: {reason}")
+    if status not in {"ready", "available"}:
+        raise ReplayError(f"Unsupported v4 change feed status: {status!r}")
+
+    pages_raw = feed.get("pages")
+    if isinstance(pages_raw, list) and pages_raw:
+        pages: list[Mapping[str, Any]] = [p for p in pages_raw if isinstance(p, dict)]
+    else:
+        events_raw = feed.get("events")
+        events_list = (
+            [e for e in events_raw if isinstance(e, dict)]
+            if isinstance(events_raw, list)
+            else []
+        )
+        pages = [
+            {
+                "page_index": 0,
+                "cursor": "page:0000",
+                "next_cursor": None,
+                "has_more": False,
+                "events": events_list,
+            }
+        ]
+
+    expected_cursor: str | None = None
+    last_seq = 0
+    for idx, page in enumerate(pages):
+        cursor = page.get("cursor")
+        if (
+            idx > 0
+            and expected_cursor is not None
+            and isinstance(cursor, str)
+            and cursor != expected_cursor
+        ):
+            raise ReplayError(
+                f"v4 change feed cursor discontinuity at page {idx}: "
+                f"expected {expected_cursor}, got {cursor}"
+            )
+        events = page.get("events")
+        if not isinstance(events, list):
+            raise ReplayError("v4 change feed page has no events list")
+        for ev in events:
+            if not isinstance(ev, dict):
+                raise ReplayError("v4 change feed event is not an object")
+            seq = ev.get("seq")
+            if isinstance(seq, int):
+                if seq <= last_seq:
+                    raise ReplayError(
+                        f"v4 change feed sequence out of order: {seq} <= {last_seq}"
+                    )
+                last_seq = seq
+            etype = str(ev.get("type") or "")
+            if etype == "entity_added":
+                raw_ent = ev.get("entity")
+                ent: Mapping[str, Any] = raw_ent if isinstance(raw_ent, dict) else ev
+                rid = str(ent.get("reep_id") or ev.get("reep_id") or "")
+                entity_type = str(
+                    ent.get("entity_type") or ev.get("entity_type") or "person"
+                )
+                canonical_name = str(
+                    ent.get("canonical_name")
+                    or ent.get("label")
+                    or ev.get("canonical_name")
+                    or ev.get("label")
+                    or rid
+                )
+                gender = ent.get("gender") or None
+                country = ent.get("country") or None
+                birth_date = ent.get("birth_date") or None
+                birth_date_iso = ent.get("birth_date_iso") or None
+                dob_precision = ent.get("dob_precision") or None
+                grade = str(ent.get("grade") or "A")
+                bucket_count = str(ent.get("bucket_count") or "2")
+                corroboration_buckets = ent.get("corroboration_buckets") or None
+                metadata_json = ent.get("metadata_json") or None
+                updated_at = ent.get("updated_at") or None
+                con.execute("DELETE FROM entities WHERE reep_id = ?", [rid])
+                ent_sql = (
+                    "INSERT INTO entities VALUES "
+                    "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL)"
+                )
+                con.execute(
+                    ent_sql,
+                    [
+                        rid,
+                        entity_type,
+                        canonical_name,
+                        gender,
+                        country,
+                        birth_date,
+                        birth_date_iso,
+                        dob_precision,
+                        grade,
+                        bucket_count,
+                        corroboration_buckets,
+                        metadata_json,
+                        updated_at,
+                        canonical_name,
+                        grade,
+                        bucket_count,
+                    ],
+                )
+            elif etype == "entity_withdrawn":
+                rid = str(ev.get("reep_id") or "")
+                con.execute("DELETE FROM entities WHERE reep_id = ?", [rid])
+            elif etype == "label_changed":
+                rid = str(ev.get("reep_id") or "")
+                raw_after = ev.get("after")
+                after: Mapping[str, Any] | None = (
+                    raw_after if isinstance(raw_after, dict) else None
+                )
+                new_label = str(
+                    (after.get("canonical_name") if after else None)
+                    or (after.get("label") if after else None)
+                    or ev.get("current_label")
+                    or ev.get("new_label")
+                    or ev.get("canonical_name")
+                    or ""
+                )
+                lbl_sql = (
+                    "UPDATE entities SET canonical_name = ?, label = ? "
+                    "WHERE reep_id = ?"
+                )
+                con.execute(lbl_sql, [new_label, new_label, rid])
+            elif etype in {"bridge_added", "bridge_repointed"}:
+                raw_after_br = ev.get("after")
+                raw_br = ev.get("bridge")
+                br: Mapping[str, Any] = (
+                    raw_after_br
+                    if isinstance(raw_after_br, dict)
+                    else (raw_br if isinstance(raw_br, dict) else ev)
+                )
+                provider = str(br.get("provider") or ev.get("provider") or "")
+                namespace = str(br.get("namespace") or ev.get("namespace") or "default")
+                external_id = str(br.get("external_id") or ev.get("external_id") or "")
+                reep_id = str(
+                    br.get("reep_id")
+                    or ev.get("to_reep_id")
+                    or ev.get("new_reep_id")
+                    or ev.get("reep_id")
+                    or ""
+                )
+                entity_type = str(
+                    br.get("entity_type") or ev.get("entity_type") or "person"
+                )
+                ind_bucket = str(br.get("independence_bucket") or provider.upper())
+                route_scope = str(br.get("route_scope") or "crosswalk")
+                rule_id = str(br.get("rule_id") or "C4_EXACT")
+                confidence = str(br.get("confidence") or "1.0")
+                attached_at = br.get("attached_at")
+                br_del_sql = (
+                    "DELETE FROM bridges "
+                    "WHERE provider = ? AND namespace = ? AND external_id = ?"
+                )
+                br_ins_sql = (
+                    "INSERT INTO bridges VALUES "
+                    "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)"
+                )
+                con.execute(br_del_sql, [provider, namespace, external_id])
+                con.execute(
+                    br_ins_sql,
+                    [
+                        reep_id,
+                        provider,
+                        namespace,
+                        external_id,
+                        entity_type,
+                        ind_bucket,
+                        route_scope,
+                        rule_id,
+                        confidence,
+                        attached_at,
+                    ],
+                )
+            elif etype == "bridge_removed":
+                provider = str(ev.get("provider") or "")
+                namespace = str(ev.get("namespace") or "default")
+                external_id = str(ev.get("external_id") or "")
+                br_del_sql = (
+                    "DELETE FROM bridges "
+                    "WHERE provider = ? AND namespace = ? AND external_id = ?"
+                )
+                con.execute(br_del_sql, [provider, namespace, external_id])
+            elif etype == "redirect_added":
+                raw_red = ev.get("redirect")
+                red: Mapping[str, Any] = raw_red if isinstance(raw_red, dict) else ev
+                from_id = str(
+                    red.get("from_id")
+                    or red.get("old_reep_id")
+                    or ev.get("from_id")
+                    or ev.get("old_reep_id")
+                    or ""
+                )
+                to_id = str(
+                    red.get("to_id")
+                    or red.get("new_reep_id")
+                    or ev.get("to_id")
+                    or ev.get("new_reep_id")
+                    or ""
+                )
+                reason = str(red.get("reason") or ev.get("reason") or "merged")
+                created_at = (
+                    red.get("created_at")
+                    or red.get("redirected_at")
+                    or ev.get("redirected_at")
+                    or None
+                )
+                con.execute("DELETE FROM redirects WHERE from_id = ?", [from_id])
+                con.execute(
+                    "INSERT INTO redirects VALUES (?, ?, ?, ?)",
+                    [from_id, to_id, reason, created_at],
+                )
+            else:
+                raise ReplayError(f"Unsupported v4 change feed event type: {etype!r}")
+        next_cursor = page.get("next_cursor")
+        expected_cursor = next_cursor if isinstance(next_cursor, str) else None
+        has_more = bool(page.get("has_more", expected_cursor is not None))
+        if not has_more and idx + 1 < len(pages):
+            raise ReplayError("v4 change feed has trailing pages after final page")
+
+
+def replay_change_feed(
+    feed: Mapping[str, Any],
+    *,
+    settings: Settings | None = None,
+) -> SyncResult:
+    """Replay a parsed v4 ``reep-change-feed/v1`` document onto the local catalogue."""
+    started = time.monotonic()
+    settings = settings or Settings.from_env()
+    before = state(settings)
+    if before is None or before.stamp is None:
+        raise ReplayError("Cannot replay: there is no local catalogue.")
+    if before.schema_version != _v4.SCHEMA:
+        raise ReplayError("v4 change feed replay requires a v4 local catalogue.")
+
+    status = str(feed.get("status") or "")
+    if status == "unavailable":
+        reason = str(feed.get("reason") or "missing_prior_baseline")
+        raise ReplayError(f"v4 download replay is unavailable: {reason}")
+
+    from_stamp = str(feed.get("previous_release") or feed.get("from_release") or "")
+    to_stamp = str(feed.get("current_release") or feed.get("to_release") or "")
+    if from_stamp != before.stamp:
+        raise ReplayError(
+            f"v4 change feed starts at {from_stamp!r}, expected {before.stamp!r}."
+        )
+    validate_stamp(to_stamp)
+    if _v4.stamp_order(to_stamp) <= _v4.stamp_order(before.stamp):
+        raise ReplayError("The target release is not newer than the local catalogue.")
+
+    dest = settings.catalog_path
+    tmp = dest.with_name(f".{dest.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        shutil.copyfile(dest, tmp)
+        con = _store.connect(tmp, read_only=False)
+        try:
+            _apply_v4_change_feed_to_con(con, feed)
+            _store.check_store(con, {}, schema_version=_v4.SCHEMA)
+            _store.build_entity_search(con)
+            _store.write_metadata(
+                con,
+                {
+                    _store.META_STAMP: to_stamp,
+                    _store.META_SOURCE: "replay",
+                    _store.META_BUILT_AT: _store.now_utc(),
+                    _store.META_REPLAYED_FROM: before.stamp,
+                    _store.META_REPLAY_STEPS: "1",
+                },
+            )
+            con.execute("CHECKPOINT")
+        finally:
+            con.close()
+        _store.replace_file(tmp, dest)
+    finally:
+        _store.remove_db_files(tmp)
+    return SyncResult(
+        path=dest,
+        profile=before.profile or "slim",
+        method="replay",
+        stamp_before=before.stamp,
+        stamp_after=to_stamp,
+        downloaded_bytes=0,
+        seconds=time.monotonic() - started,
+        notes=("replayed 1 changelog(s)",),
+    )
+
+
+class _V4Replay:
+    """Replay a v4 change feed from the release bucket onto a local v4 catalogue."""
+
+    def __init__(
+        self,
+        rc: ReleaseClient,
+        target: ReleaseManifest,
+        before: CatalogState,
+        wanted: list[str],
+        *,
+        settings: Settings,
+        profile: str,
+        max_steps: int,
+        progress: Callable[[str, int, int | None], None] | None,
+    ) -> None:
+        self.rc = rc
+        self.target = target
+        self.before = before
+        self.wanted = wanted
+        self.settings = settings
+        self.profile = profile
+        self.max_steps = max_steps
+        self.progress = progress
+        self.downloaded = 0
+        self._download_dirs: set[Path] = set()
+
+    def remove_downloads(self) -> None:
+        for directory in self._download_dirs:
+            shutil.rmtree(directory, ignore_errors=True)
+
+    def run(self) -> int:
+        before_stamp = self.before.stamp
+        if before_stamp is None:
+            raise ReplayError("The local catalogue has no release stamp.")
+        try:
+            raw = self.rc.fetch_bytes(f"releases/{self.target.stamp}/change_feed.json")
+        except NotFoundError as exc:
+            raise ReplayError("v4 download replay is unavailable") from exc
+        self.downloaded += len(raw)
+        feed = _v4.loads(raw, "change_feed.json")
+        if not isinstance(feed, dict):
+            raise ReplayError("change_feed.json is not a JSON object.")
+        if feed.get("status") == "unavailable":
+            reason = str(feed.get("reason") or "missing_prior_baseline")
+            raise ReplayError(f"v4 download replay is unavailable: {reason}")
+        from_stamp = str(feed.get("previous_release") or feed.get("from_release") or "")
+        to_stamp = str(feed.get("current_release") or feed.get("to_release") or "")
+        if to_stamp != self.target.stamp:
+            raise ReplayError(
+                f"The change feed of {self.target.stamp} names release {to_stamp}."
+            )
+        if from_stamp != before_stamp:
+            raise ReplayError(
+                f"The change feed of {self.target.stamp} starts from {from_stamp}, "
+                f"not {before_stamp}."
+            )
+        dest = self.settings.catalog_path
+        tmp = dest.with_name(f".{dest.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            shutil.copyfile(dest, tmp)
+            con = _store.connect(tmp, read_only=False)
+            try:
+                _apply_v4_change_feed_to_con(con, feed)
+                directory = self.settings.downloads_dir / self.target.stamp
+                self._download_dirs.add(directory)
+                for table in self.wanted:
+                    if table in {"entities", "bridges", "redirects"}:
+                        continue
+                    entry = self.target.table_file(table)
+                    if entry is None:
+                        raise ReplayError(
+                            f"Release {self.target.stamp} has no {table} table."
+                        )
+                    path = self.rc.download(
+                        entry,
+                        directory / entry.name,
+                        progress=_named(self.progress, entry.name),
+                    )
+                    self.downloaded += entry.size
+                    con.execute(f"DROP TABLE IF EXISTS {table}")
+                    _store.load_table(
+                        con,
+                        table,
+                        path,
+                        schema_version=self.target.schema_version,
+                        layout=self.target.layout,
+                    )
+                expected_rows = {
+                    table: entry.rows
+                    for table in self.wanted
+                    if (entry := self.target.table_file(table)) is not None
+                    and entry.rows is not None
+                }
+                try:
+                    _store.check_store(
+                        con,
+                        expected_rows,
+                        schema_version=self.target.schema_version,
+                        layout=self.target.layout,
+                    )
+                except UnsupportedReleaseError as exc:
+                    raise ReplayError(
+                        f"The replayed catalogue does not match release "
+                        f"{self.target.stamp}: {exc.message}"
+                    ) from exc
+                _store.build_entity_search(con)
+                _store.write_metadata(
+                    con,
+                    {
+                        _store.META_STAMP: self.target.stamp,
+                        _store.META_SCHEMA: self.target.schema_version,
+                        _store.META_LAYOUT: self.target.layout,
+                        _store.META_TIER: self.target.tier,
+                        _store.META_GENERATED_AT: self.target.generated_at,
+                        _store.META_SDK_VERSION: __version__,
+                        _store.META_STORE_VERSION: _store.STORE_VERSION,
+                        _store.META_PROFILE: self.profile,
+                        _store.META_SOURCE: "replay",
+                        _store.META_BUILT_AT: _store.now_utc(),
+                        _store.META_BRIDGE_ATTRS: None,
+                        _store.META_REPLAYED_FROM: before_stamp,
+                        _store.META_REPLAY_STEPS: "1",
+                        **_manifest_metadata(self.target),
+                    },
+                )
+                con.execute("CHECKPOINT")
+            finally:
+                con.close()
+            _store.replace_file(tmp, dest)
+        finally:
+            _store.remove_db_files(tmp)
+        return 1
 
 
 class _Replay:

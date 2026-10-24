@@ -402,3 +402,211 @@ def test_catalog_in_use_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     with pytest.raises(CatalogInUseError) as exc:
         _store.replace_file(tmp_path / "a", tmp_path / "b")
     assert exc.value.exit_code == 7
+
+
+def _v4_rows(bucket: Any, table: str) -> tuple[list[str], list[dict[str, str]]]:
+    import csv
+    import io
+
+    raw = gzip.decompress((bucket.root / f"{table}.csv.gz").read_bytes()).decode()
+    reader = csv.DictReader(io.StringIO(raw))
+    return list(reader.fieldnames or []), list(reader)
+
+
+def _v4_write_rows(
+    bucket: Any, table: str, header: list[str], values: list[dict[str, Any]]
+) -> None:
+    import csv
+    import io
+
+    from reep import _v4
+    from tests.support.v4_release import encode
+
+    out = io.StringIO(newline="")
+    writer = csv.DictWriter(out, fieldnames=header, lineterminator="\n")
+    writer.writeheader()
+    writer.writerows(values)
+    (bucket.root / f"{table}.csv.gz").write_bytes(
+        gzip.compress(out.getvalue().encode(), mtime=0)
+    )
+    manifest = json.loads((bucket.root / "manifest.json").read_text())
+    manifest[_v4.COUNT_KEYS[table]] = len(values)
+    (bucket.root / "manifest.json").write_bytes(encode(manifest))
+
+
+def test_v4_change_feed_replays_all_seven_event_types_across_pages(
+    tmp_path: Path,
+) -> None:
+    from tests.support.v4_release import STAMP, V4Bucket, encode
+
+    v4 = V4Bucket(tmp_path / "v4-release")
+    settings = make_settings(tmp_path / "v4-cache")
+    with v4.client() as client:
+        first = catalog.sync(client=client, settings=settings)
+        assert first.method == "snapshot"
+        assert first.stamp_after == STAMP
+
+    e_hdr, e_rows = _v4_rows(v4, "entities")
+    b_hdr, b_rows = _v4_rows(v4, "bridges")
+    r_hdr, r_rows = _v4_rows(v4, "redirects")
+
+    # Mutate entities:
+    # - label_changed on rt8df038ffeaed40 ("Home United" -> "Home United FC")
+    # - entity_withdrawn on rv7bffdbdab61249
+    # - entity_added on rp00000000000999
+    withdrawn_id = "rv7bffdbdab61249"
+    added_id = "rp00000000000999"
+    renamed_id = "rt8df038ffeaed40"
+    new_e_rows: list[dict[str, str]] = []
+    added_entity_template: dict[str, str] = {}
+    for row in e_rows:
+        if row["reep_id"] == withdrawn_id:
+            continue
+        if row["reep_id"] == renamed_id:
+            row = {**row, "canonical_name": "Home United FC"}
+        if not added_entity_template:
+            added_entity_template = dict(row)
+        new_e_rows.append(row)
+    added_entity = {
+        **added_entity_template,
+        "reep_id": added_id,
+        "entity_type": "person",
+        "canonical_name": "Added V4 Player",
+    }
+    new_e_rows.append(added_entity)
+
+    # Mutate bridges:
+    # - bridge_removed on any bridge pointing to withdrawn_id
+    # - bridge_repointed on transfermarkt/team/TH -> added_id
+    # - bridge_added on opta/player/NEW999 -> added_id
+    new_b_rows: list[dict[str, str]] = []
+    repointed_bridge: dict[str, str] | None = None
+    removed_bridges: list[dict[str, str]] = []
+    for row in b_rows:
+        if row["reep_id"] == withdrawn_id:
+            removed_bridges.append(row)
+            continue
+        if (
+            row["provider"] == "transfermarkt"
+            and row["namespace"] == "team"
+            and row["external_id"] == "TH"
+        ):
+            row = {**row, "reep_id": added_id, "entity_type": "person"}
+            repointed_bridge = row
+        new_b_rows.append(row)
+    assert repointed_bridge is not None
+    added_bridge = {
+        **new_b_rows[0],
+        "reep_id": added_id,
+        "provider": "opta",
+        "namespace": "player",
+        "external_id": "NEW999",
+        "entity_type": "person",
+    }
+    new_b_rows.append(added_bridge)
+
+    # Mutate redirects:
+    # - redirect_added from withdrawn_id -> renamed_id
+    added_redirect = {
+        "from_id": withdrawn_id,
+        "to_id": renamed_id,
+        "reason": "merged",
+        "created_at": "2026-10-23T12:00:00Z",
+    }
+    new_r_rows = [*r_rows, added_redirect]
+
+    _v4_write_rows(v4, "entities", e_hdr, new_e_rows)
+    _v4_write_rows(v4, "bridges", b_hdr, new_b_rows)
+    _v4_write_rows(v4, "redirects", r_hdr, new_r_rows)
+    next_stamp = "2026-10-23.2"
+    v4.rebuild(next_stamp)
+
+    events: list[dict[str, Any]] = [
+        {"seq": 1, "type": "entity_added", "reep_id": added_id, "entity": added_entity},
+        {"seq": 2, "type": "entity_withdrawn", "reep_id": withdrawn_id},
+        {
+            "seq": 3,
+            "type": "label_changed",
+            "reep_id": renamed_id,
+            "current_label": "Home United FC",
+        },
+        {"seq": 4, "type": "bridge_added", "bridge": added_bridge},
+        {"seq": 5, "type": "bridge_repointed", "after": repointed_bridge},
+    ]
+    seq = 6
+    for rb in removed_bridges:
+        events.append(
+            {
+                "seq": seq,
+                "type": "bridge_removed",
+                "provider": rb["provider"],
+                "namespace": rb["namespace"],
+                "external_id": rb["external_id"],
+            }
+        )
+        seq += 1
+    events.append({"seq": seq, "type": "redirect_added", "redirect": added_redirect})
+
+    feed_doc = {
+        "schema": "reep-change-feed/v1",
+        "status": "ready",
+        "reason": None,
+        "previous_release": STAMP,
+        "current_release": next_stamp,
+        "pages": [
+            {
+                "page_index": 0,
+                "cursor": "page:0000",
+                "next_cursor": "page:0001",
+                "has_more": True,
+                "events": events[:3],
+            },
+            {
+                "page_index": 1,
+                "cursor": "page:0001",
+                "next_cursor": None,
+                "has_more": False,
+                "events": events[3:],
+            },
+        ],
+    }
+    v4.objects[f"releases/{next_stamp}/change_feed.json"] = encode(feed_doc)
+
+    with v4.client() as client:
+        replayed = catalog.sync(client=client, settings=settings)
+    assert replayed.method == "replay"
+    assert replayed.stamp_before == STAMP
+    assert replayed.stamp_after == next_stamp
+
+    fresh_settings = make_settings(tmp_path / "v4-fresh")
+    with v4.client() as client:
+        catalog.sync(client=client, settings=fresh_settings, method="snapshot")
+    _assert_same_data(settings.catalog_path, fresh_settings.catalog_path)
+
+
+def test_v4_change_feed_unavailable_status_is_explicit(tmp_path: Path) -> None:
+    from tests.support.v4_release import V4Bucket, encode
+
+    v4 = V4Bucket(tmp_path / "v4-unavail")
+    settings = make_settings(tmp_path / "v4-unavail-cache")
+    with v4.client() as client:
+        catalog.sync(client=client, settings=settings)
+
+    next_stamp = "2026-10-23.2"
+    v4.rebuild(next_stamp)
+    v4.objects[f"releases/{next_stamp}/change_feed.json"] = encode(
+        {
+            "schema": "reep-change-feed/v1",
+            "status": "unavailable",
+            "reason": "missing_prior_baseline",
+            "previous_release": None,
+            "current_release": next_stamp,
+            "pages": [],
+        }
+    )
+    with v4.client() as client:
+        with pytest.raises(ReplayError, match="missing_prior_baseline"):
+            catalog.sync(client=client, settings=settings, method="replay")
+        fallback = catalog.sync(client=client, settings=settings, method="auto")
+    assert fallback.method == "snapshot"
+    assert "missing_prior_baseline" in fallback.notes[0]

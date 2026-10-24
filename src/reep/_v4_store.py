@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from reep import _historical_v4
 from reep.errors import UnsupportedReleaseError
 
 if TYPE_CHECKING:
@@ -112,13 +113,21 @@ COLUMNS: dict[str, list[str]] = {
 }
 
 
-def validate_columns(table: str, columns: list[str]) -> None:
+def validate_columns(
+    table: str, columns: list[str], *, historical: bool = False
+) -> None:
     """Reject an unknown table layout before interpreting any v4 column."""
-    if table not in COLUMNS or columns != COLUMNS[table]:
+    if historical and table in _historical_v4.INTERNAL_COLUMNS:
+        expected: list[str] | None = _historical_v4.INTERNAL_COLUMNS[table]
+    elif historical and table == "matches":
+        expected = _historical_v4.MATCH_COLUMNS
+    else:
+        expected = COLUMNS.get(table)
+    if expected is None or columns != expected:
         raise UnsupportedReleaseError(f"Unsupported v4 {table} column layout.")
 
 
-def projection(table: str, relation: str) -> str:
+def projection(table: str, relation: str, *, historical: bool = False) -> str:
     """Expose equivalent SDK fields, keeping unpublished lifecycle values NULL."""
     additions = {
         "entities": ", canonical_name AS label, NULL::VARCHAR AS status, "
@@ -129,6 +138,13 @@ def projection(table: str, relation: str) -> str:
         "matches": ", NULL::VARCHAR AS status, match_date_iso AS kickoff_date, "
         "NULL::VARCHAR AS competition_id",
     }
+    if historical and table == "matches":
+        additions["matches"] += (
+            ", NULL::VARCHAR AS season_id, NULL::VARCHAR AS home_team_id, "
+            "NULL::VARCHAR AS away_team_id, NULL::INTEGER AS home_score, "
+            "NULL::INTEGER AS away_score, NULL::VARCHAR AS match_state, "
+            "NULL::VARCHAR AS result_form, NULL::VARCHAR AS score_basis"
+        )
     # relation is a fixed SELECT/quoted catalogue name supplied by the store owner.
     return f"SELECT *{additions.get(table, '')} FROM {relation}"  # noqa: S608
 

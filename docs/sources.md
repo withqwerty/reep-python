@@ -20,6 +20,17 @@ a manifest has no stamps, so it can fill Reep IDs but cannot fill provider IDs.
 Changelog replay keeps the older bridge status stamp; take a snapshot before filling
 provider IDs.
 
+For `reep-public-release/v4` bundles and the retained `bridge-register-v1` /
+`v4_physical_views` (`bridge-register-v1/v4_physical_views/1`) variant, the SDK
+verifies the selector (`releases/latest.json`), the release descriptor
+(`release.json`), and the bound source manifest (`manifest.json`), reports
+`published` with `current_status = None` when entity lifecycle is not published,
+refuses unpublished match filters (`status`, `competition_id`, and for
+`v4_physical_views` also `season_id` and `team_id`), and marks a bare shipped
+`reep-register.duckdb` file opened without a verified release descriptor as
+`publication_identity = "unverified_local_file"` without exposing internal `_*`
+relations.
+
 ## What the API returns differently
 
 The local data is the full release. The API serves the same release with these

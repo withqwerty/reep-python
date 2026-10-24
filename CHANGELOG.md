@@ -18,8 +18,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Versioned v4 downloads: the download selector and immutable descriptor are checked
   independently of the API channel, including object hashes, lengths, inventory and
-  bound table counts. Slim/full catalogues and local imports support the declared
-  flat CSV layout; shipped v4 DuckDB files are adapted in memory and remain read-only.
+  bound table counts, for both `reep-public-release/v4` and the retained
+  `bridge-register-v1` / `v4_physical_views` (`bridge-register-v1/v4_physical_views/1`)
+  variant. Slim/full catalogues and local imports support the declared CSV layouts;
+  shipped v4 DuckDB files are adapted in memory without exposing internal `_*`
+  relations, remain read-only, and refuse unpublished match parent filters.
 - `IdStatus.PUBLISHED` reports a present downloaded ID whose lifecycle is unreported.
   `Entity.status` can now be `None`, as can resolution/current lifecycle fields.
   Missing upstream status and legacy rung remain unknown. V4 redirect reasons are

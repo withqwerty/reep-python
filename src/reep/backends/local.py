@@ -11,7 +11,7 @@ import logging
 import unicodedata
 from typing import TYPE_CHECKING, Any
 
-from reep import _store, _v4, _v4_store
+from reep import _historical_v4, _store, _v4, _v4_store
 from reep.backends.base import resolution_from_states
 from reep.errors import CatalogMissingError, UnsupportedReleaseError
 from reep.models import (
@@ -138,9 +138,12 @@ class LocalBackend:
                 hint="Point REEP_DUCKDB_PATH at a reep-register-v1.duckdb file.",
             )
         self._meta = _store.read_metadata(self._con)
-        self._v4 = self._meta.get(_store.META_SCHEMA) == _v4.SCHEMA
-        if not self._v4 and "canonical_name" in _store.table_columns(
-            self._con, "entities"
+        self._historical = self._meta.get(_store.META_LAYOUT) == _historical_v4.LAYOUT
+        self._v4 = self._meta.get(_store.META_SCHEMA) == _v4.SCHEMA or self._historical
+        if (
+            not self._v4
+            and not self._meta
+            and "canonical_name" in _store.table_columns(self._con, "entities")
         ):
             try:
                 self._bind_shipped_v4()
@@ -151,34 +154,44 @@ class LocalBackend:
 
     def _bind_shipped_v4(self) -> None:
         """Adapt an exact shipped layout in memory; never write to the release."""
-        if self._tables != set(_v4.TABLES):
+        historical = self._tables == set(_v4.TABLES) | _historical_v4.INTERNAL_TABLES
+        if not historical and self._tables != set(_v4.TABLES):
             raise UnsupportedReleaseError(
                 "Shipped v4 table inventory differs from its contract."
             )
         for table in sorted(self._tables):
-            _v4_store.validate_columns(table, _store.table_columns(self._con, table))
+            _v4_store.validate_columns(
+                table,
+                _store.table_columns(self._con, table),
+                historical=historical,
+            )
         self._con.close()
         import duckdb
 
         self._con = duckdb.connect(":memory:")
         path = str(self.path.resolve()).replace("'", "''")
         self._con.execute(f"ATTACH '{path}' AS downloaded (READ_ONLY)")
-        for table in sorted(self._tables):
+        public_tables = set(_v4.TABLES)
+        for table in sorted(public_tables):
             self._con.execute(
                 f"CREATE VIEW {table} AS "
-                + _v4_store.projection(table, f"downloaded.main.{table}")
+                + _v4_store.projection(
+                    table, f"downloaded.main.{table}", historical=historical
+                )
             )
         _v4_store.check_content(self._con)
         self._con.execute(
-            "CREATE VIEW aliases AS " + _v4_store.aliases_query(self._tables)
+            "CREATE VIEW aliases AS " + _v4_store.aliases_query(public_tables)
         )
-        self._tables.add("aliases")
+        self._tables = public_tables | {"aliases"}
         self._meta = {
-            _store.META_SCHEMA: _v4.SCHEMA,
+            _store.META_SCHEMA: "bridge-register-v1" if historical else _v4.SCHEMA,
+            **({_store.META_LAYOUT: _historical_v4.LAYOUT} if historical else {}),
             "publication_identity": "unverified_local_file",
             "lifecycle": "not_published",
         }
         self._v4 = True
+        self._historical = historical
 
     def close(self) -> None:
         """Close the DuckDB connection."""
@@ -567,6 +580,11 @@ class LocalBackend:
         if self._v4 and (status is not None or competition_id is not None):
             raise UnsupportedReleaseError(
                 "v4 downloads do not publish match lifecycle or competition IDs; "
+                "this filter is unavailable."
+            )
+        if self._historical and (season_id is not None or team_id is not None):
+            raise UnsupportedReleaseError(
+                "Historical v4 downloads do not publish match season or team IDs; "
                 "this filter is unavailable."
             )
         conditions = ["1=1"]

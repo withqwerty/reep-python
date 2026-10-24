@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, Self, TypeAlias
 
 import httpx
 
-from reep import _v4
+from reep import _historical_v4, _v4
 from reep._version import USER_AGENT
 from reep.config import DEFAULT_RELEASES_URL
 from reep.errors import (
@@ -131,6 +131,7 @@ class LatestPointer:
     generated_at: str | None = None
     manifest_size: int | None = None
     selection: dict[str, Any] | None = field(default=None, repr=False)
+    layout: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,6 +177,12 @@ class ReleaseManifest:
     files: Mapping[str, ReleaseFile]
     raw: Mapping[str, Any] = field(repr=False, compare=False)
     identity_sha256: str | None = None
+    layout: str | None = None
+
+    @property
+    def unpublished_lifecycle(self) -> bool:
+        """Whether this explicit layout supplies presence but no lifecycle state."""
+        return self.schema_version == _v4.SCHEMA or self.layout == _historical_v4.LAYOUT
 
     @classmethod
     def from_json(cls, data: object) -> ReleaseManifest:
@@ -226,7 +233,12 @@ class ReleaseManifest:
                 hint=_UPGRADE_HINT,
             )
         stamp = data.get("stamp")
-        if not _valid_legacy_stamp(stamp):
+        historical = data.get(
+            "projection_mode"
+        ) == _historical_v4.MODE or _historical_v4.valid_stamp(stamp)
+        if historical:
+            _historical_v4.descriptor(data)
+        if not historical and not _valid_legacy_stamp(stamp):
             raise UnsupportedReleaseError(
                 f"release.json has no valid stamp: {stamp!r}."
             )
@@ -246,6 +258,7 @@ class ReleaseManifest:
             tier=tier if isinstance(tier, str) else None,
             files=files,
             raw=data,
+            layout=_historical_v4.LAYOUT if historical else None,
         )
 
     def file(self, name: str) -> ReleaseFile:
@@ -284,6 +297,8 @@ class ReleaseManifest:
         """Return the names of the CSV tables in the release."""
         if self.schema_version == _v4.SCHEMA:
             return tuple(sorted(_v4.TABLES))
+        if self.layout == _historical_v4.LAYOUT:
+            return tuple(sorted(_historical_v4.TABLES))
         names = [
             name.removeprefix("csv/").removesuffix(".csv.gz")
             for name in self.files
@@ -427,7 +442,10 @@ class ReleaseClient:
             )
         stamp = data.get("stamp")
         sha = data.get("manifest_sha256")
-        if not _valid_legacy_stamp(stamp):
+        historical = _historical_v4.valid_stamp(stamp)
+        if historical:
+            _historical_v4.selector(data)
+        if not historical and not _valid_legacy_stamp(stamp):
             raise UnsupportedReleaseError("latest.json has no valid stamp.")
         if not isinstance(sha, str) or not _SHA256.match(sha):
             raise UnsupportedReleaseError("latest.json has no manifest checksum.")
@@ -442,6 +460,7 @@ class ReleaseClient:
             ),
             manifest_sha256=sha,
             generated_at=generated_at if isinstance(generated_at, str) else None,
+            layout=_historical_v4.LAYOUT if historical else None,
         )
 
     def manifest(self, stamp: str | None = None) -> ReleaseManifest:
@@ -490,6 +509,8 @@ class ReleaseClient:
             raise UnsupportedReleaseError(
                 f"release.json names stamp {manifest.stamp}, expected {expected_stamp}."
             )
+        if pointer is not None and pointer.layout != manifest.layout:
+            raise UnsupportedReleaseError("Selector and descriptor layout differ.")
         if manifest.schema_version == _v4.SCHEMA:
             parsed = _v4.descriptor(
                 dict(manifest.raw), pointer.selection if pointer else None
@@ -504,6 +525,11 @@ class ReleaseClient:
         elif pointer is not None and pointer.selection is not None:
             raise UnsupportedReleaseError(
                 "A v4 selector cannot select a legacy manifest."
+            )
+        elif manifest.layout == _historical_v4.LAYOUT:
+            ref = manifest.file("manifest.json")
+            manifest = with_source_manifest(
+                manifest, self._get_bytes(ref.object_key, max_bytes=_v4.METADATA_LIMIT)
             )
         return replace(manifest, identity_sha256=hashlib.sha256(body).hexdigest())
 
@@ -689,7 +715,10 @@ def _loads(body: bytes, name: str) -> object:
 
 
 def with_source_manifest(manifest: ReleaseManifest, raw: bytes) -> ReleaseManifest:
-    """Bind v4 row counts to its exact producer manifest; legacy is unchanged."""
+    """Bind each explicit v4 layout to its own exact producer manifest."""
+    if manifest.layout == _historical_v4.LAYOUT:
+        _historical_v4.source_counts(raw, dict(manifest.raw))
+        return manifest
     counts = _v4.source_counts(raw, dict(manifest.raw))
     return replace(
         manifest,

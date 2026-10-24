@@ -25,7 +25,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
-from reep import _store, _v4, changelog
+from reep import _historical_v4, _store, _v4, changelog
 from reep._version import __version__
 from reep.config import Settings
 from reep.errors import (
@@ -135,6 +135,7 @@ class CatalogState:
     import_fingerprint: str | None = None
     schema_version: str | None = None
     manifest_sha256: str | None = None
+    layout: str | None = None
 
 
 def state(settings: Settings | None = None) -> CatalogState | None:
@@ -167,6 +168,7 @@ def state(settings: Settings | None = None) -> CatalogState | None:
         import_fingerprint=meta.get(_store.META_IMPORT_FINGERPRINT),
         schema_version=meta.get(_store.META_SCHEMA),
         manifest_sha256=meta.get(_store.META_MANIFEST_HASH),
+        layout=meta.get(_store.META_LAYOUT),
     )
 
 
@@ -216,9 +218,9 @@ def profile_tables(
             and (entry.role in _TABLE_ROLES or entry.role is None)
         ]
     tables = list(_store.SLIM_TABLES)
-    if with_aliases and manifest.schema_version == _v4.SCHEMA:
+    if with_aliases and manifest.unpublished_lifecycle:
         tables.extend(["provider_aliases", "overlay_aliases"])
-    if with_aliases and manifest.table_file("aliases") is not None:
+    elif with_aliases and manifest.table_file("aliases") is not None:
         tables.append("aliases")
     return tables
 
@@ -290,14 +292,14 @@ def sync(
         manifest = rc.manifest(stamp)
         wanted = profile_tables(manifest, chosen_profile, with_aliases=aliases)
         _check_existing_identity(before, manifest)
-        if method == "replay" and manifest.schema_version == _v4.SCHEMA:
+        if method == "replay" and manifest.unpublished_lifecycle:
             raise ReplayError("v4 download replay is unavailable; use a snapshot.")
         if (
             not force
             and before is not None
             and before.stamp == manifest.stamp
             and (
-                manifest.schema_version != _v4.SCHEMA
+                not manifest.unpublished_lifecycle
                 or before.manifest_sha256 == manifest.identity_sha256
             )
             and before.profile == chosen_profile
@@ -394,9 +396,11 @@ def _replay_blocker(
     wanted: list[str],
 ) -> str | None:
     """Return why a replay is not possible, or ``None`` when it is."""
-    if target.schema_version == _v4.SCHEMA:
+    if target.unpublished_lifecycle:
         return "v4 download replay is unavailable"
-    if before is not None and before.schema_version == _v4.SCHEMA:
+    if before is not None and (
+        before.schema_version == _v4.SCHEMA or before.layout == _historical_v4.LAYOUT
+    ):
         return "replay cannot cross release schemas"
     if before is None:
         return "there is no local catalogue"
@@ -467,7 +471,7 @@ def import_release(
         body = local_manifest.read_bytes()
         manifest = ReleaseManifest.from_json(_v4.loads(body, "release.json"))
         manifest = replace(manifest, identity_sha256=hashlib.sha256(body).hexdigest())
-        if manifest.schema_version == _v4.SCHEMA:
+        if manifest.unpublished_lifecycle:
             if len(body) > _v4.METADATA_LIMIT:
                 raise UnsupportedReleaseError(
                     "Release descriptor exceeds metadata bound."
@@ -496,9 +500,7 @@ def import_release(
         wanted = [
             t
             for t in profile_tables(manifest, profile, with_aliases=with_aliases)
-            if manifest.schema_version == _v4.SCHEMA
-            or t in files
-            or t in _store.SLIM_TABLES
+            if manifest.unpublished_lifecycle or t in files or t in _store.SLIM_TABLES
         ]
     else:
         wanted = list(_store.SLIM_TABLES)
@@ -530,6 +532,21 @@ def import_release(
                 )
             if entry.rows is not None:
                 expected_rows[table] = entry.rows
+        if manifest.layout == _historical_v4.LAYOUT:
+            for alias in _historical_v4.ALIASES:
+                if alias in files:
+                    entry = manifest.file(f"csv/{alias}.csv.gz")
+                    alias_path = files[alias]
+                    actual = sha256_file(alias_path)
+                    if (
+                        actual != entry.sha256
+                        or alias_path.stat().st_size != entry.size
+                    ):
+                        raise ChecksumMismatchError(
+                            f"{alias_path} does not match release {manifest.stamp} "
+                            f"(SHA-256 {actual}, expected {entry.sha256}).",
+                            hint="Check that every file comes from the same release.",
+                        )
     else:
         logger.warning(
             "No release manifest for %s; the files are not checked and the "
@@ -541,6 +558,7 @@ def import_release(
             tables=tables,
             stamp=manifest.stamp if manifest else None,
             schema_version=manifest.schema_version if manifest else None,
+            layout=manifest.layout if manifest else None,
             profile=profile,
             source="import",
             generated_at=manifest.generated_at if manifest else None,
@@ -621,6 +639,7 @@ def _snapshot(
             tables=paths,
             stamp=manifest.stamp,
             schema_version=manifest.schema_version,
+            layout=manifest.layout,
             profile=profile,
             source="download",
             generated_at=manifest.generated_at,

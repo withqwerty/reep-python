@@ -704,6 +704,12 @@ def _apply_v4_change_feed_to_con(
         raise ReplayError(f"Unsupported v4 change feed status: {status!r}")
 
     tables = _store.table_names(con)
+    alias_has_is_primary = False
+    if "aliases" in tables:
+        alias_cols = {
+            str(r[0]) for r in con.execute("DESCRIBE aliases").fetchall()
+        }
+        alias_has_is_primary = "is_primary" in alias_cols
     pages_raw = feed.get("pages")
     if isinstance(pages_raw, list) and pages_raw:
         pages: list[Mapping[str, Any]] = [p for p in pages_raw if isinstance(p, dict)]
@@ -867,11 +873,33 @@ def _apply_v4_change_feed_to_con(
                 )
                 con.execute(lbl_sql, [new_label, new_label, rid])
                 if "aliases" in tables:
-                    alias_sql = (
-                        "UPDATE aliases SET alias = ? "
-                        "WHERE reep_id = ? AND is_primary = true"
-                    )
-                    con.execute(alias_sql, [new_label, rid])
+                    if alias_has_is_primary:
+                        alias_sql = (
+                            "UPDATE aliases SET alias = ? "
+                            "WHERE reep_id = ? AND is_primary = true"
+                        )
+                        con.execute(alias_sql, [new_label, rid])
+                    else:
+                        raw_before = ev.get("before")
+                        before_map: Mapping[str, Any] | None = (
+                            raw_before if isinstance(raw_before, dict) else None
+                        )
+                        old_label = str(
+                            (
+                                before_map.get("canonical_name")
+                                if before_map
+                                else None
+                            )
+                            or (before_map.get("label") if before_map else None)
+                            or ev.get("previous_label")
+                            or ""
+                        )
+                        if old_label:
+                            alias_upd_sql = (
+                                "UPDATE aliases SET alias = ? "
+                                "WHERE reep_id = ? AND alias = ?"
+                            )
+                            con.execute(alias_upd_sql, [new_label, rid, old_label])
             elif etype in {"bridge_added", "bridge_repointed", "bridge_attachments"}:
                 raw_after_br = ev.get("after")
                 raw_br = ev.get("bridge")

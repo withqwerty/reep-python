@@ -838,6 +838,8 @@ def _apply_v4_change_feed_to_con(
             elif etype == "entity_withdrawn":
                 rid = str(ev.get("reep_id") or ev.get("entity_id") or "")
                 con.execute("DELETE FROM entities WHERE reep_id = ?", [rid])
+                if "bridges" in tables and rid:
+                    con.execute("DELETE FROM bridges WHERE reep_id = ?", [rid])
                 if "redirects" in tables and rid:
                     con.execute(
                         "DELETE FROM redirects WHERE from_id = ? OR to_id = ?",

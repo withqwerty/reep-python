@@ -672,6 +672,26 @@ def _snapshot(
     return downloaded
 
 
+_PROVIDER_BUCKET_FALLBACK: dict[str, str] = {
+    "opta": "OPTA",
+    "whoscored": "OPTA",
+    "espn": "OPTA",
+    "fotmob": "OPTA",
+    "fpl": "OPTA",
+    "second_spectrum": "OPTA",
+    "kicker": "OPTA",
+    "fbref": "OPTA",
+    "transfermarkt": "TM",
+    "soccerdonna": "TM",
+    "sportmonks": "SPORTMONKS",
+    "sofifa": "SPORTMONKS",
+    "wyscout": "WYSCOUT",
+    "statsbomb": "STATSBOMB",
+    "jleague": "JLEAGUE",
+    "worldfootball": "WORLDFOOTBALL",
+}
+
+
 def _apply_v4_change_feed_to_con(
     con: duckdb.DuckDBPyConnection, feed: Mapping[str, Any]
 ) -> None:
@@ -683,6 +703,7 @@ def _apply_v4_change_feed_to_con(
     if status not in {"ready", "available"}:
         raise ReplayError(f"Unsupported v4 change feed status: {status!r}")
 
+    tables = _store.table_names(con)
     pages_raw = feed.get("pages")
     if isinstance(pages_raw, list) and pages_raw:
         pages: list[Mapping[str, Any]] = [p for p in pages_raw if isinstance(p, dict)]
@@ -693,6 +714,22 @@ def _apply_v4_change_feed_to_con(
             if isinstance(events_raw, list)
             else []
         )
+        if not events_list:
+            for key, mapped_type in (
+                ("minted_entities", "entity_added"),
+                ("bridge_attachments", "bridge_added"),
+                ("bridge_detachments", "bridge_removed"),
+                ("redirects", "redirect_added"),
+                ("dob_updates", "dob_updates"),
+                ("scoreline_updates", "scoreline_updates"),
+            ):
+                section = feed.get(key)
+                if isinstance(section, list):
+                    for item in section:
+                        if isinstance(item, dict):
+                            events_list.append(
+                                {"type": item.get("type") or mapped_type, **item}
+                            )
         pages = [
             {
                 "page_index": 0,
@@ -731,7 +768,7 @@ def _apply_v4_change_feed_to_con(
                     )
                 last_seq = seq
             etype = str(ev.get("type") or "")
-            if etype == "entity_added":
+            if etype in {"entity_added", "minted_entities"}:
                 raw_ent = ev.get("entity")
                 ent: Mapping[str, Any] = raw_ent if isinstance(raw_ent, dict) else ev
                 rid = str(ent.get("reep_id") or ev.get("reep_id") or "")
@@ -784,6 +821,16 @@ def _apply_v4_change_feed_to_con(
             elif etype == "entity_withdrawn":
                 rid = str(ev.get("reep_id") or "")
                 con.execute("DELETE FROM entities WHERE reep_id = ?", [rid])
+                if "overlay_links" in tables:
+                    con.execute("DELETE FROM overlay_links WHERE reep_id = ?", [rid])
+                if "overlay_aliases" in tables:
+                    con.execute("DELETE FROM overlay_aliases WHERE reep_id = ?", [rid])
+                if "provider_aliases" in tables:
+                    con.execute(
+                        "DELETE FROM provider_aliases WHERE reep_id = ?", [rid]
+                    )
+                if "aliases" in tables:
+                    con.execute("DELETE FROM aliases WHERE reep_id = ?", [rid])
             elif etype == "label_changed":
                 rid = str(ev.get("reep_id") or "")
                 raw_after = ev.get("after")
@@ -803,7 +850,13 @@ def _apply_v4_change_feed_to_con(
                     "WHERE reep_id = ?"
                 )
                 con.execute(lbl_sql, [new_label, new_label, rid])
-            elif etype in {"bridge_added", "bridge_repointed"}:
+                if "aliases" in tables:
+                    alias_sql = (
+                        "UPDATE aliases SET alias = ? "
+                        "WHERE reep_id = ? AND is_primary = true"
+                    )
+                    con.execute(alias_sql, [new_label, rid])
+            elif etype in {"bridge_added", "bridge_repointed", "bridge_attachments"}:
                 raw_after_br = ev.get("after")
                 raw_br = ev.get("bridge")
                 br: Mapping[str, Any] = (
@@ -821,21 +874,94 @@ def _apply_v4_change_feed_to_con(
                     or ev.get("reep_id")
                     or ""
                 )
+                existing_br = con.execute(
+                    "SELECT entity_type, independence_bucket, route_scope, rule_id, "
+                    "confidence, attached_at, rung, upstream_status FROM bridges "
+                    "WHERE provider = ? AND namespace = ? AND external_id = ? LIMIT 1",
+                    [provider, namespace, external_id],
+                ).fetchone()
                 entity_type = str(
-                    br.get("entity_type") or ev.get("entity_type") or "person"
+                    br.get("entity_type")
+                    or ev.get("entity_type")
+                    or (existing_br[0] if existing_br and existing_br[0] else None)
+                    or "person"
                 )
-                ind_bucket = str(br.get("independence_bucket") or provider.upper())
-                route_scope = str(br.get("route_scope") or "crosswalk")
-                rule_id = str(br.get("rule_id") or "C4_EXACT")
-                confidence = str(br.get("confidence") or "1.0")
-                attached_at = br.get("attached_at")
+                raw_bucket = (
+                    br.get("independence_bucket")
+                    if br.get("independence_bucket") is not None
+                    else (
+                        ev.get("independence_bucket")
+                        if ev.get("independence_bucket") is not None
+                        else (existing_br[1] if existing_br else None)
+                    )
+                )
+                ind_bucket = (
+                    str(raw_bucket)
+                    if raw_bucket is not None
+                    else _PROVIDER_BUCKET_FALLBACK.get(provider.lower())
+                )
+                raw_route = (
+                    br.get("route_scope")
+                    if br.get("route_scope") is not None
+                    else (
+                        ev.get("route_scope")
+                        if ev.get("route_scope") is not None
+                        else (existing_br[2] if existing_br else None)
+                    )
+                )
+                route_scope = str(raw_route) if raw_route is not None else None
+                raw_rule = (
+                    br.get("rule_id")
+                    if br.get("rule_id") is not None
+                    else (
+                        ev.get("rule_id")
+                        if ev.get("rule_id") is not None
+                        else (existing_br[3] if existing_br else None)
+                    )
+                )
+                rule_id = str(raw_rule) if raw_rule is not None else None
+                raw_conf = (
+                    br.get("confidence")
+                    if br.get("confidence") is not None
+                    else (
+                        br.get("confidence_tier")
+                        if br.get("confidence_tier") is not None
+                        else (
+                            ev.get("confidence")
+                            if ev.get("confidence") is not None
+                            else (
+                                ev.get("confidence_tier")
+                                if ev.get("confidence_tier") is not None
+                                else (existing_br[4] if existing_br else None)
+                            )
+                        )
+                    )
+                )
+                confidence = str(raw_conf) if raw_conf is not None else None
+                attached_at = (
+                    br.get("attached_at")
+                    or br.get("last_confirmed_release")
+                    or br.get("first_seen_release")
+                    or ev.get("attached_at")
+                    or (existing_br[5] if existing_br else None)
+                )
+                rung = (
+                    br.get("rung")
+                    or ev.get("rung")
+                    or (existing_br[6] if existing_br else None)
+                )
+                upstream_status = (
+                    br.get("upstream_status")
+                    or ev.get("upstream_status")
+                    or (existing_br[7] if existing_br else None)
+                )
                 br_del_sql = (
                     "DELETE FROM bridges "
                     "WHERE provider = ? AND namespace = ? AND external_id = ?"
                 )
                 br_ins_sql = (
                     "INSERT INTO bridges VALUES "
-                    "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)"
+                    "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                 )
                 con.execute(br_del_sql, [provider, namespace, external_id])
                 con.execute(
@@ -851,9 +977,11 @@ def _apply_v4_change_feed_to_con(
                         rule_id,
                         confidence,
                         attached_at,
+                        rung,
+                        upstream_status,
                     ],
                 )
-            elif etype == "bridge_removed":
+            elif etype in {"bridge_removed", "bridge_detachments"}:
                 provider = str(ev.get("provider") or "")
                 namespace = str(ev.get("namespace") or "default")
                 external_id = str(ev.get("external_id") or "")
@@ -862,7 +990,7 @@ def _apply_v4_change_feed_to_con(
                     "WHERE provider = ? AND namespace = ? AND external_id = ?"
                 )
                 con.execute(br_del_sql, [provider, namespace, external_id])
-            elif etype == "redirect_added":
+            elif etype in {"redirect_added", "redirects"}:
                 raw_red = ev.get("redirect")
                 red: Mapping[str, Any] = raw_red if isinstance(raw_red, dict) else ev
                 from_id = str(
@@ -891,6 +1019,35 @@ def _apply_v4_change_feed_to_con(
                     "INSERT INTO redirects VALUES (?, ?, ?, ?)",
                     [from_id, to_id, reason, created_at],
                 )
+            elif etype in {"dob_updates", "dob_changed"}:
+                rid = str(ev.get("reep_id") or "")
+                new_dob = (
+                    ev.get("new_birth_date_iso")
+                    or ev.get("birth_date_iso")
+                    or ev.get("birth_date")
+                )
+                new_prec = ev.get("dob_precision")
+                if rid:
+                    con.execute(
+                        "UPDATE entities SET birth_date = ?, birth_date_iso = ?, "
+                        "dob_precision = COALESCE(?, dob_precision) "
+                        "WHERE reep_id = ?",
+                        [new_dob, new_dob, new_prec, rid],
+                    )
+            elif etype in {"scoreline_updates", "scoreline_changed"}:
+                mid = str(ev.get("match_id") or ev.get("reep_id") or "")
+                h_score = ev.get("new_home_score", ev.get("home_score"))
+                a_score = ev.get("new_away_score", ev.get("away_score"))
+                if "matches" in tables and mid:
+                    con.execute(
+                        "UPDATE matches SET home_score = ?, away_score = ? "
+                        "WHERE reep_id = ?",
+                        [
+                            str(h_score) if h_score is not None else None,
+                            str(a_score) if a_score is not None else None,
+                            mid,
+                        ],
+                    )
             else:
                 raise ReplayError(f"Unsupported v4 change feed event type: {etype!r}")
         next_cursor = page.get("next_cursor")
@@ -929,6 +1086,17 @@ def replay_change_feed(
     if _v4.stamp_order(to_stamp) <= _v4.stamp_order(before.stamp):
         raise ReplayError("The target release is not newer than the local catalogue.")
 
+    target_manifest_hash = (
+        feed.get("manifest_sha256")
+        or feed.get("target_manifest_sha256")
+        or feed.get("identity_sha256")
+    )
+    resolved_manifest_hash = (
+        str(target_manifest_hash)
+        if isinstance(target_manifest_hash, str) and target_manifest_hash
+        else None
+    )
+
     dest = settings.catalog_path
     tmp = dest.with_name(f".{dest.name}.{uuid.uuid4().hex}.tmp")
     try:
@@ -946,6 +1114,7 @@ def replay_change_feed(
                     _store.META_BUILT_AT: _store.now_utc(),
                     _store.META_REPLAYED_FROM: before.stamp,
                     _store.META_REPLAY_STEPS: "1",
+                    _store.META_MANIFEST_HASH: resolved_manifest_hash,
                 },
             )
             con.execute("CHECKPOINT")

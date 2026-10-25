@@ -610,3 +610,105 @@ def test_v4_change_feed_unavailable_status_is_explicit(tmp_path: Path) -> None:
         fallback = catalog.sync(client=client, settings=settings, method="auto")
     assert fallback.method == "snapshot"
     assert "missing_prior_baseline" in fallback.notes[0]
+
+
+def test_v4_replay_preserves_provenance_and_clears_stale_manifest_hash(
+    tmp_path: Path,
+) -> None:
+    from tests.support.v4_release import STAMP, V4Bucket
+
+    v4 = V4Bucket(tmp_path / "bucket")
+    settings = make_settings(tmp_path / "cache")
+    with v4.client() as client:
+        catalog.sync(client=client, settings=settings, profile="full")
+
+    con_before = duckdb.connect(str(settings.catalog_path), read_only=True)
+    meta_before = dict(
+        con_before.execute("SELECT key, value FROM release_metadata").fetchall()
+    )
+    con_before.close()
+
+    next_stamp = "2026-10-23.2"
+    v4.rebuild(next_stamp)
+    feed_doc = {
+        "schema": "reep-change-feed/v1",
+        "status": "ready",
+        "channel": "downloads",
+        "previous_release": STAMP,
+        "current_release": next_stamp,
+        "pages": [
+            {
+                "page_index": 0,
+                "cursor": "page:0000",
+                "next_cursor": None,
+                "has_more": False,
+                "events": [
+                    {
+                        "seq": 1,
+                        "type": "bridge_added",
+                        "bridge": {
+                            "reep_id": "rt8df038ffeaed40",
+                            "provider": "sofifa",
+                            "namespace": "team",
+                            "external_id": "SOFIFA_999",
+                            "entity_type": "team",
+                        },
+                    },
+                    {
+                        "seq": 2,
+                        "type": "bridge_added",
+                        "bridge": {
+                            "reep_id": "rt8df038ffeaed40",
+                            "provider": "whoscored",
+                            "namespace": "team",
+                            "external_id": "WS_888",
+                            "entity_type": "team",
+                            "independence_bucket": "OPTA",
+                            "route_scope": "structural",
+                            "rule_id": "C2_EXACT",
+                            "confidence_tier": "0.95",
+                            "first_seen_release": "2026-10-20.1",
+                            "last_confirmed_release": "2026-10-23.2",
+                        },
+                    },
+                ],
+            }
+        ],
+    }
+    res = catalog.replay_change_feed(feed_doc, settings=settings)
+    assert res.method == "replay"
+    assert res.stamp_after == next_stamp
+
+    con_after = duckdb.connect(str(settings.catalog_path), read_only=True)
+    meta_after = dict(
+        con_after.execute("SELECT key, value FROM release_metadata").fetchall()
+    )
+    sofifa_row = con_after.execute(
+        "SELECT provider, independence_bucket, route_scope, rule_id, confidence "
+        "FROM bridges WHERE external_id = 'SOFIFA_999'"
+    ).fetchone()
+    ws_row = con_after.execute(
+        "SELECT provider, independence_bucket, route_scope, rule_id, "
+        "confidence, attached_at "
+        "FROM bridges WHERE external_id = 'WS_888'"
+    ).fetchone()
+    con_after.close()
+
+    assert sofifa_row == ("sofifa", "SPORTMONKS", None, None, None)
+    assert ws_row == (
+        "whoscored",
+        "OPTA",
+        "structural",
+        "C2_EXACT",
+        "0.95",
+        "2026-10-23.2",
+    )
+    assert meta_after.get("source_stamp") == next_stamp
+    assert meta_after.get("sdk_manifest_sha256") != meta_before.get(
+        "sdk_manifest_sha256"
+    )
+
+    with v4.client() as client:
+        sync_after = catalog.sync(client=client, settings=settings, profile="full")
+    assert sync_after.stamp_after == next_stamp
+

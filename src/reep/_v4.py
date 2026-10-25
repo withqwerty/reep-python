@@ -12,7 +12,7 @@ from reep.errors import ChecksumMismatchError, UnsupportedReleaseError
 
 SCHEMA = "reep-public-release/v4"
 SELECTOR = "reep-public-selection/v1"
-METADATA_LIMIT = 65_536
+METADATA_LIMIT = 2_097_152
 TABLES = (
     "entities",
     "bridges",
@@ -262,6 +262,8 @@ def source_counts(raw: bytes, release: dict[str, Any]) -> dict[str, int]:
 
 def loads(raw: bytes, label: str) -> Any:
     """Reject duplicate JSON fields rather than choosing a conflicting value."""
+    if label == "latest.json" and len(raw) > 65_536:
+        raise UnsupportedReleaseError("Release metadata exceeds its byte bound.")
 
     def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
         result: dict[str, Any] = {}

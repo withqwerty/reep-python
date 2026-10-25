@@ -712,3 +712,61 @@ def test_v4_replay_preserves_provenance_and_clears_stale_manifest_hash(
         sync_after = catalog.sync(client=client, settings=settings, profile="full")
     assert sync_after.stamp_after == next_stamp
 
+
+def test_v4_metadata_limit_and_redirect_withdrawn_replay(tmp_path: Path) -> None:
+    from reep import _v4
+    from tests.support.v4_release import STAMP, V4Bucket
+
+    assert _v4.METADATA_LIMIT == 2_097_152
+
+    v4 = V4Bucket(tmp_path / "bucket-rw")
+    settings = make_settings(tmp_path / "cache-rw")
+    with v4.client() as client:
+        catalog.sync(client=client, settings=settings)
+
+    next_stamp = "2026-10-23.2"
+    v4.rebuild(next_stamp)
+    feed_doc = {
+        "schema": "reep-change-feed/v1",
+        "status": "ready",
+        "channel": "downloads",
+        "previous_release": STAMP,
+        "current_release": next_stamp,
+        "events": [],
+        "pages": [
+            {
+                "page_index": 0,
+                "cursor": "page:0000",
+                "next_cursor": None,
+                "has_more": False,
+                "events": [
+                    {
+                        "seq": 1,
+                        "op": "redirect_added",
+                        "from_reep_id": "rp99999999999901",
+                        "to_reep_id": "rt8df038ffeaed40",
+                        "reason": "merged",
+                    },
+                    {
+                        "seq": 2,
+                        "op": "redirect_withdrawn",
+                        "from_reep_id": "rp99999999999901",
+                        "reason": "target_withdrawn",
+                    },
+                ],
+            }
+        ],
+    }
+    res = catalog.replay_change_feed(feed_doc, settings=settings)
+    assert res.method == "replay"
+    assert res.stamp_after == next_stamp
+    con_after = duckdb.connect(str(settings.catalog_path), read_only=True)
+    try:
+        cnt = con_after.execute(
+            "SELECT count(*) FROM redirects WHERE from_id = 'rp99999999999901'"
+        ).fetchone()[0]
+    finally:
+        con_after.close()
+    assert cnt == 0
+
+

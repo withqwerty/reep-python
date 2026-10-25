@@ -728,7 +728,12 @@ def _apply_v4_change_feed_to_con(
                     for item in section:
                         if isinstance(item, dict):
                             events_list.append(
-                                {"type": item.get("type") or mapped_type, **item}
+                                {
+                                    "type": item.get("type")
+                                    or item.get("op")
+                                    or mapped_type,
+                                    **item,
+                                }
                             )
         pages = [
             {
@@ -767,11 +772,17 @@ def _apply_v4_change_feed_to_con(
                         f"v4 change feed sequence out of order: {seq} <= {last_seq}"
                     )
                 last_seq = seq
-            etype = str(ev.get("type") or "")
+            etype = str(ev.get("type") or ev.get("op") or "")
             if etype in {"entity_added", "minted_entities"}:
                 raw_ent = ev.get("entity")
                 ent: Mapping[str, Any] = raw_ent if isinstance(raw_ent, dict) else ev
-                rid = str(ent.get("reep_id") or ev.get("reep_id") or "")
+                rid = str(
+                    ent.get("reep_id")
+                    or ent.get("entity_id")
+                    or ev.get("reep_id")
+                    or ev.get("entity_id")
+                    or ""
+                )
                 entity_type = str(
                     ent.get("entity_type") or ev.get("entity_type") or "person"
                 )
@@ -819,8 +830,13 @@ def _apply_v4_change_feed_to_con(
                     ],
                 )
             elif etype == "entity_withdrawn":
-                rid = str(ev.get("reep_id") or "")
+                rid = str(ev.get("reep_id") or ev.get("entity_id") or "")
                 con.execute("DELETE FROM entities WHERE reep_id = ?", [rid])
+                if "redirects" in tables and rid:
+                    con.execute(
+                        "DELETE FROM redirects WHERE from_id = ? OR to_id = ?",
+                        [rid, rid],
+                    )
                 if "overlay_links" in tables:
                     con.execute("DELETE FROM overlay_links WHERE reep_id = ?", [rid])
                 if "overlay_aliases" in tables:
@@ -832,7 +848,7 @@ def _apply_v4_change_feed_to_con(
                 if "aliases" in tables:
                     con.execute("DELETE FROM aliases WHERE reep_id = ?", [rid])
             elif etype == "label_changed":
-                rid = str(ev.get("reep_id") or "")
+                rid = str(ev.get("reep_id") or ev.get("entity_id") or "")
                 raw_after = ev.get("after")
                 after: Mapping[str, Any] | None = (
                     raw_after if isinstance(raw_after, dict) else None
@@ -869,9 +885,11 @@ def _apply_v4_change_feed_to_con(
                 external_id = str(br.get("external_id") or ev.get("external_id") or "")
                 reep_id = str(
                     br.get("reep_id")
+                    or br.get("entity_id")
                     or ev.get("to_reep_id")
                     or ev.get("new_reep_id")
                     or ev.get("reep_id")
+                    or ev.get("entity_id")
                     or ""
                 )
                 existing_br = con.execute(
@@ -995,15 +1013,19 @@ def _apply_v4_change_feed_to_con(
                 red: Mapping[str, Any] = raw_red if isinstance(raw_red, dict) else ev
                 from_id = str(
                     red.get("from_id")
+                    or red.get("from_reep_id")
                     or red.get("old_reep_id")
                     or ev.get("from_id")
+                    or ev.get("from_reep_id")
                     or ev.get("old_reep_id")
                     or ""
                 )
                 to_id = str(
                     red.get("to_id")
+                    or red.get("to_reep_id")
                     or red.get("new_reep_id")
                     or ev.get("to_id")
+                    or ev.get("to_reep_id")
                     or ev.get("new_reep_id")
                     or ""
                 )
@@ -1019,6 +1041,22 @@ def _apply_v4_change_feed_to_con(
                     "INSERT INTO redirects VALUES (?, ?, ?, ?)",
                     [from_id, to_id, reason, created_at],
                 )
+            elif etype in {"redirect_withdrawn", "redirect_removed"}:
+                raw_red_w = ev.get("redirect")
+                red_w: Mapping[str, Any] = (
+                    raw_red_w if isinstance(raw_red_w, dict) else ev
+                )
+                from_id = str(
+                    red_w.get("from_id")
+                    or red_w.get("from_reep_id")
+                    or red_w.get("old_reep_id")
+                    or ev.get("from_id")
+                    or ev.get("from_reep_id")
+                    or ev.get("old_reep_id")
+                    or ""
+                )
+                if "redirects" in tables and from_id:
+                    con.execute("DELETE FROM redirects WHERE from_id = ?", [from_id])
             elif etype in {"dob_updates", "dob_changed"}:
                 rid = str(ev.get("reep_id") or "")
                 new_dob = (

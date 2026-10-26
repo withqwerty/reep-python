@@ -40,9 +40,32 @@ jobs:
           path: dist/
           if-no-files-found: error
 
+  # CI runs on Linux only, so a release is the first time a tree meets macOS
+  # and Windows. Nothing publishes until both pass.
+  test-cross-os:
+    name: Test (Python 3.14, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version-file: pyproject.toml
+          python-version: "3.14"
+          enable-cache: false
+      - run: uv sync --locked --no-default-groups --group test
+      - run: uv run pytest
+
   publish:
     name: Publish to PyPI
-    needs: build
+    needs: [build, test-cross-os]
     runs-on: ubuntu-latest
     environment:
       name: pypi

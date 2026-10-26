@@ -38,15 +38,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # While the repository is private, macOS and Windows run one Python each.
+        # Linux only. macOS and Windows bill at 10x and 2x the Linux rate, so
+        # they run in release.yml before a tag publishes, not on every push.
         # The go-public checklist in docs/plan.md widens this matrix.
         os: [ubuntu-latest]
         python: ["3.11", "3.12", "3.13", "3.14"]
-        include:
-          - os: macos-latest
-            python: "3.14"
-          - os: windows-latest
-            python: "3.14"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

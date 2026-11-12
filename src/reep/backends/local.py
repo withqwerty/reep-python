@@ -154,11 +154,15 @@ class LocalBackend:
 
     def _bind_shipped_v4(self) -> None:
         """Adapt an exact shipped layout in memory; never write to the release."""
-        historical = self._tables == set(_v4.TABLES) | _historical_v4.INTERNAL_TABLES
-        if not historical and self._tables != set(_v4.TABLES):
+        internal = _historical_v4.INTERNAL_TABLES
+        public_tables = set(_v4.TABLES) & self._tables
+        # Internal tables are optional; edges left the public scope on 2026-11-05.
+        missing = set(_v4.TABLES) - _v4.OPTIONAL_SHIPPED_TABLES - self._tables
+        if missing or self._tables - set(_v4.TABLES) - internal:
             raise UnsupportedReleaseError(
                 "Shipped v4 table inventory differs from its contract."
             )
+        historical = bool(self._tables & internal)
         for table in sorted(self._tables):
             _v4_store.validate_columns(
                 table,
@@ -171,7 +175,6 @@ class LocalBackend:
         self._con = duckdb.connect(":memory:")
         path = str(self.path.resolve()).replace("'", "''")
         self._con.execute(f"ATTACH '{path}' AS downloaded (READ_ONLY)")
-        public_tables = set(_v4.TABLES)
         for table in sorted(public_tables):
             self._con.execute(
                 f"CREATE VIEW {table} AS "

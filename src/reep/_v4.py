@@ -51,6 +51,22 @@ COUNT_KEYS = dict(
         strict=True,
     )
 )
+#: Public tables that a shipped DuckDB file may omit: edges left the public scope.
+OPTIONAL_SHIPPED_TABLES = frozenset({"edges"})
+#: Mapping tables whose parquet file the producer manifest checksums bind.
+#: Every other file is bound by the descriptor's sha256 and size only: the
+#: producer manifest is not re-issued when a republish re-lays a file.
+MAPPING_PARQUET = tuple(
+    f"{t}.parquet"
+    for t in (
+        "bridges",
+        "entities",
+        "redirects",
+        "overlay_links",
+        "overlay_aliases",
+        "provider_aliases",
+    )
+)
 _SHA = re.compile(r"[a-f0-9]{64}\Z")
 _STAMP = re.compile(r"(\d{4}-\d{2}-\d{2})\.([1-9]\d{0,19})\Z")
 
@@ -231,7 +247,7 @@ def bound_bytes(raw: bytes, ref: dict[str, Any], label: str) -> None:
 
 
 def source_counts(raw: bytes, release: dict[str, Any]) -> dict[str, int]:
-    """Bind the producer manifest's counts/checksums to the public descriptor."""
+    """Bind the producer manifest's counts and mapping-table checksums."""
     bound_bytes(raw, release["files"]["manifest.json"], "manifest.json")
     value = loads(raw, "manifest.json")
     need(isinstance(value, dict), "source manifest object")
@@ -242,12 +258,7 @@ def source_counts(raw: bytes, release: dict[str, Any]) -> dict[str, int]:
     )
     checksums = value.get("checksums_sha256")
     need(isinstance(checksums, dict), "source checksums")
-    for name in FILES - {
-        "manifest.json",
-        "latest.json",
-        "upkeep_ledger.json",
-        "site-summary.json",
-    }:
+    for name in MAPPING_PARQUET:
         need(
             checksums.get(name) == release["files"][name]["sha256"],
             f"source checksum for {name}",

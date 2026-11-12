@@ -312,7 +312,7 @@ def test_source_manifest_binding(v4: V4Bucket, mutation: str) -> None:
     if mutation == "count":
         manifest["entity_count"] = -1
     elif mutation == "checksum":
-        manifest["checksums_sha256"]["entities.csv.gz"] = "0" * 64
+        manifest["checksums_sha256"]["entities.parquet"] = "0" * 64
     elif mutation == "tag":
         manifest["release_tag"] = "2026-10-23.2"
     else:

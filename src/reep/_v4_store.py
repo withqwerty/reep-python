@@ -164,9 +164,11 @@ def check_content(con: duckdb.DuckDBPyConnection) -> None:
             "OR namespace IS NULL OR namespace='' OR external_id IS NULL OR "
             "external_id='' OR reep_id IS NULL OR reep_id=''"
         ),
-        "duplicate exact bridge keys": (
+        # A repeated identical mapping is harmless (release 2026-10-19.1 holds
+        # three); one key that names two entities is a conflict.
+        "conflicting exact bridge keys": (
             "SELECT count(*) FROM (SELECT provider,namespace,external_id FROM "
-            "bridges GROUP BY ALL HAVING count(*)<>1)"
+            "bridges GROUP BY ALL HAVING count(DISTINCT reep_id)<>1)"
         ),
         "dangling bridges": (
             "SELECT count(*) FROM bridges b ANTI JOIN entities e USING(reep_id)"

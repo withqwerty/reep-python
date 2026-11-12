@@ -16,7 +16,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   aliases, provider aliases); a republish leaves its other checksums stale. A shipped
   DuckDB file may omit the internal `_*` tables and `edges` (which left the public
   scope on 2026-11-05); their columns are still checked when present, a missing
-  public table or an unknown extra table still refuses the file.
+  public table or an unknown extra table still refuses the file. A bridge key that
+repeats the same mapping (release 2026-10-19.1 holds three) no longer refuses; a
+key that names two entities still does.
 - Remote `Register.matches()` now reads the real API match envelope and translates
   date and home/away filters. Offset traversal follows generation-bound cursors;
   malformed pages and stale cursors raise errors instead of returning false misses.

@@ -485,7 +485,10 @@ def test_historical_bad_table_never_replaces_catalogue(
         hv4.publish_descriptor()
     elif mutation == "duplicate_bridge":
         header, rows = read_csv_rows(hv4, "bridges")
-        rows.append(dict(rows[0]))
+        # An identical repeat is harmless (see test_v4_source_binding); a key that
+        # names two entities is a conflict.
+        other = next(r["reep_id"] for r in rows if r["reep_id"] != rows[0]["reep_id"])
+        rows.append({**rows[0], "reep_id": other})
         write_csv_rows(hv4, "bridges", header, rows)
         hv4.rebuild("2026-10-23.2")
     elif mutation == "dangling_bridge":

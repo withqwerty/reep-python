@@ -16,14 +16,25 @@ import pytest
 
 from reep import Register, _v4
 from reep.backends.local import LocalBackend
+from reep.catalog import sync
 from reep.errors import ChecksumMismatchError, UnsupportedReleaseError
+from tests.conftest import make_settings
 from tests.support.v4_release import HistoricalV4Bucket, V4Bucket, encode, sha
+from tests.test_v4_downloads import rows, write_rows
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 TEAM = "rt8df038ffeaed40"
 STALE = "0" * 64
+MAPPING = (
+    "bridges.parquet",
+    "entities.parquet",
+    "redirects.parquet",
+    "overlay_links.parquet",
+    "overlay_aliases.parquet",
+    "provider_aliases.parquet",
+)
 #: Files whose producer checksum was stale in 2026-10-19.1, and a file it omits.
 UNBOUND = [
     "bridges.csv",
@@ -57,14 +68,7 @@ def source_manifest(v4: V4Bucket) -> dict[str, Any]:
 
 
 def test_mapping_parquet_list_is_the_six_mapping_tables() -> None:
-    assert _v4.MAPPING_PARQUET == (
-        "bridges.parquet",
-        "entities.parquet",
-        "redirects.parquet",
-        "overlay_links.parquet",
-        "overlay_aliases.parquet",
-        "provider_aliases.parquet",
-    )
+    assert MAPPING == _v4.MAPPING_PARQUET
 
 
 def test_stale_or_absent_producer_checksums_outside_the_mapping_parquet_pass(
@@ -84,7 +88,7 @@ def test_stale_or_absent_producer_checksums_outside_the_mapping_parquet_pass(
     assert parsed.table_file("entities").rows == 8  # type: ignore[union-attr]
 
 
-@pytest.mark.parametrize("name", _v4.MAPPING_PARQUET)
+@pytest.mark.parametrize("name", MAPPING)
 def test_mapping_parquet_checksum_mismatch_still_refuses(
     v4: V4Bucket, name: str
 ) -> None:
@@ -252,3 +256,53 @@ def test_columns_of_the_optional_edges_table_are_checked_when_present(
         con.execute("ALTER TABLE edges ADD COLUMN extra VARCHAR")
     with pytest.raises(UnsupportedReleaseError, match="layout"):
         LocalBackend(path)
+
+
+def test_a_repeated_identical_bridge_row_is_harmless(
+    hv4: HistoricalV4Bucket, tmp_path: Path
+) -> None:
+    """Release 2026-10-19.1 holds three repeated api_football manager mappings."""
+    path = published_shape(hv4, tmp_path)
+    with duckdb.connect(str(path)) as con:
+        con.execute(
+            "INSERT INTO bridges SELECT * FROM bridges "
+            "WHERE provider = 'opta' AND namespace = 'team' AND external_id = 'TH'"
+        )
+        repeated = con.execute(
+            "SELECT count(*) FROM bridges WHERE provider = 'opta' "
+            "AND namespace = 'team' AND external_id = 'TH'"
+        ).fetchone()
+    assert repeated == (2,)
+    with Register.local(path) as reg:
+        resolved = reg.resolve("opta:team:TH")
+        assert resolved.found
+        assert resolved.reep_id == TEAM
+
+
+def test_one_bridge_key_naming_two_entities_still_refuses(
+    hv4: HistoricalV4Bucket, tmp_path: Path
+) -> None:
+    path = published_shape(hv4, tmp_path)
+    with duckdb.connect(str(path)) as con:
+        con.execute(
+            "INSERT INTO bridges SELECT * REPLACE ('rt11111111111111' AS reep_id) "
+            "FROM bridges WHERE provider = 'opta' AND namespace = 'team' "
+            "AND external_id = 'TH'"
+        )
+    with pytest.raises(UnsupportedReleaseError, match="bridge keys"):
+        LocalBackend(path)
+
+
+def test_sync_accepts_a_repeated_bridge_row_and_refuses_a_conflict(
+    v4: V4Bucket, tmp_path: Path
+) -> None:
+    header, values = rows(v4, "bridges")
+    write_rows(v4, "bridges", header, [*values, dict(values[0])])
+    settings = make_settings(tmp_path / "cache")
+    with v4.client() as client:
+        assert sync(client=client, settings=settings).method == "snapshot"
+    other = next(r["reep_id"] for r in values if r["reep_id"] != values[0]["reep_id"])
+    write_rows(v4, "bridges", header, [*values, {**values[0], "reep_id": other}])
+    v4.rebuild("2026-10-23.2")
+    with v4.client() as client, pytest.raises(UnsupportedReleaseError, match="bridge"):
+        sync(client=client, settings=make_settings(tmp_path / "cache2"))

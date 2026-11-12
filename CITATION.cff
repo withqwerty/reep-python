@@ -9,7 +9,7 @@ authors:
 repository-code: "https://github.com/withqwerty/reep-python"
 url: "https://reep.football"
 license: MIT
-version: 0.2.0
+version: 0.3.0
 keywords:
   - football
   - soccer

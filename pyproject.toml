@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "reep"
-version = "0.2.0"
+version = "0.3.0"
 description = "Python SDK and CLI for the Reep football entity register: exact provider ID lookups, offline or through the API"
 readme = "README.md"
 license = "MIT"

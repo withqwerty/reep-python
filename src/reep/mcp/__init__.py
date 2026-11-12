@@ -307,7 +307,7 @@ def create_server(
         """Return the local catalogue, its release and age, and the backend in use.
 
         When backend is null, the register is not downloaded: tell the user that
-        'reep catalog sync' downloads about 210 MB (no key needed).
+        'reep catalog sync' downloads about 230 MB (no key needed).
         """
         try:
             data, stamp = status_data(settings or Settings.from_env())

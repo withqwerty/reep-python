@@ -1,6 +1,6 @@
 """Tests against the live public release. Run them with ``pytest -m network``.
 
-They download about 210 MB. Point ``--basetemp`` at a disk with space.
+They download about 230 MB. Point ``--basetemp`` at a disk with space.
 """
 
 from __future__ import annotations

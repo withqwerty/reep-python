@@ -7,7 +7,7 @@ provider's IDs to another's.
 
 ```bash
 pip install reep            # or: uv tool install reep
-reep catalog sync           # download the register (about 210 MB, no key)
+reep catalog sync           # download the register (about 230 MB, no key)
 reep resolve transfermarkt spieler 568177
 reep translate transfermarkt/spieler/568177 --to fbref
 ```

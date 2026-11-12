@@ -2,7 +2,7 @@
 
 > Python SDK and command-line tool for the Reep Register, the open crosswalk of football provider IDs. Exact matching on (provider, namespace, external_id) only.
 
-Install: `pip install reep` or `uv tool install reep`. Get the data: `reep catalog sync` (about 210 MB, no key). Add `--json` to any command; check `data.status`; exit codes: 0 ok, 2 usage (read the hint), 3 not found, 4 rows need review, 5 auth, 6 network or database, 7 no catalogue. Agent skill file: `reep skill print`. MCP server: `reep mcp` (extra `reep[mcp]`).
+Install: `pip install reep` or `uv tool install reep`. Get the data: `reep catalog sync` (about 230 MB, no key). Add `--json` to any command; check `data.status`; exit codes: 0 ok, 2 usage (read the hint), 3 not found, 4 rows need review, 5 auth, 6 network or database, 7 no catalogue. Agent skill file: `reep skill print`. MCP server: `reep mcp` (extra `reep[mcp]`).
 
 ## Docs
 

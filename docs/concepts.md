@@ -87,7 +87,7 @@ with its SHA-256.
 
 | Profile | Tables | Use |
 |---|---|---|
-| `slim` | bridges, entities, redirects | Every lookup. About 210 MB to download. |
+| `slim` | bridges, entities, redirects | Every lookup. About 230 MB to download. |
 | `slim` with aliases | the above and aliases | Better name search. |
 | `full` | every CSV table | Relationships, per-type tables and overlays. |
 

@@ -46,7 +46,7 @@ reep status --json
 ```
 
 When `data.backend` is `null`, or a command exits with 7, the register is not
-downloaded. Tell the user that `reep catalog sync` downloads about 210 MB (free, no
+downloaded. Tell the user that `reep catalog sync` downloads about 230 MB (free, no
 key), then run it:
 
 ```bash

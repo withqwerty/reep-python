@@ -307,7 +307,7 @@ def cli(ctx: click.Context, no_input: bool, verbose: bool) -> None:
 
     \b
     Start here:
-      reep catalog sync                 download the register (about 210 MB, no key)
+      reep catalog sync                 download the register (about 230 MB, no key)
       reep providers --provider fbref   list a provider's namespaces
       reep resolve transfermarkt spieler 568177
       reep translate transfermarkt/spieler/568177 --to fbref
@@ -764,7 +764,7 @@ def catalog_sync(
 ) -> int:
     """Download the register, or update the local catalogue to the current release.
 
-    The slim profile (bridges, entities, redirects) is about 210 MB to download;
+    The slim profile (bridges, entities, redirects) is about 230 MB to download;
     later syncs replay the changelogs when they can.
 
     \b

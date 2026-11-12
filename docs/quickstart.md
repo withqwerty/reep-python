@@ -32,7 +32,7 @@ reep catalog sync
 ```
 
 The first sync downloads the slim profile (bridges, entities and redirects, about
-210 MB) and builds a DuckDB catalogue in the SDK cache directory. Later syncs replay
+230 MB) and builds a DuckDB catalogue in the SDK cache directory. Later syncs replay
 the release changelogs when they can, which downloads much less.
 
 If you already have the release files, build the catalogue from them:

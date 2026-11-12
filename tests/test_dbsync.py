@@ -556,7 +556,7 @@ def test_rows_are_written_one_by_one_without_multi_rowcount(
     assert target.status_written == len(ROWS)
 
 
-# -- Codex review r1 (WIT-3488) ---------------------------------------------
+# -- Review round 1 ---------------------------------------------------------
 
 
 def _sqlite(tmp_path: Path, *ddl: str) -> Any:

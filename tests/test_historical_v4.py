@@ -6,6 +6,7 @@ import csv
 import gzip
 import io
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +27,10 @@ TEAM = "rt8df038ffeaed40"
 MATCH = "rm8a047e9193a247"
 VENUE = "rv7bffdbdab61249"
 OLD = "rt00000000000000"
-CAPTURED_METADATA_DIR = Path("/Volumes/WQ/tmp/WIT-3630/metadata")
+# Optional captured release metadata for the two tests below; they skip without it.
+CAPTURED_METADATA_DIR = Path(
+    os.environ.get("REEP_TEST_CAPTURED_V4_DIR", "/nonexistent/reep-captured-v4")
+)
 
 
 @pytest.fixture
@@ -63,7 +67,7 @@ def test_captured_baseline_metadata_binding_ignores_misleading_selector_fields()
     None
 ):
     if not CAPTURED_METADATA_DIR.is_dir():
-        pytest.skip("captured WIT-3630 metadata directory not present")
+        pytest.skip("set REEP_TEST_CAPTURED_V4_DIR to captured release metadata")
     latest_raw = (CAPTURED_METADATA_DIR / "latest.body").read_bytes()
     release_raw = (CAPTURED_METADATA_DIR / "release.body").read_bytes()
     manifest_raw = (CAPTURED_METADATA_DIR / "manifest.body").read_bytes()
@@ -141,7 +145,7 @@ def test_captured_baseline_metadata_binding_ignores_misleading_selector_fields()
 def test_captured_shipped_duckdb_read_only_and_literal_queries() -> None:
     path = CAPTURED_METADATA_DIR / "objects/reep-register.duckdb"
     if not path.is_file():
-        pytest.skip("captured WIT-3630 shipped DuckDB not present")
+        pytest.skip("set REEP_TEST_CAPTURED_V4_DIR to a captured shipped DuckDB")
     expected_sha = "5531c8f6d723805495575eadf02464e08e8f9347135c8e3ad4fadfeed8ee8bd5"
     assert (
         json.loads((CAPTURED_METADATA_DIR / "release.body").read_text())["files"][

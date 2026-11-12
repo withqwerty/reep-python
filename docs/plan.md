@@ -177,7 +177,7 @@ October 2026). "full" loads every CSV table.
 Reasons outside this list stop the load with `UnsupportedReleaseError`, so that a new
 reason is handled on purpose and not by accident.
 
-### Versioned v4 download adapter (WIT-3625)
+### Versioned v4 download adapter
 
 The table above describes retained `bridge-register-v1` releases. V4 downloads use
 `reep-public-selection/v1` with `channel=downloads`, then the exact hash/byte-bound
@@ -499,7 +499,7 @@ Done at the end of U3, before the 0.1.0 tag:
 - [ ] Add the maintainer as a required reviewer on the `pypi` environment (GitHub offers
       this for public repositories on the current plan).
 - [ ] Publish the docs site. Ruled 2026-10-13: https://reep.football/docs/python/, served
-      by reep-site from a copy of the build (WIT-3486). The URL is in `pyproject.toml`
+      by reep-site from a copy of the build. The URL is in `pyproject.toml`
       and the README; the operator deploys reep-site.
 - [ ] Point the legacy `reep-cli` repository to this repository and archive it.
 - [ ] Link the SDK from reep.football (API and downloads pages).

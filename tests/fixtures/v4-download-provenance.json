@@ -1,5 +1,5 @@
 {
-  "input": "/Volumes/WQ/tmp/WIT-3620-match-installed/final/empty-zero/generations/59f279d5-cdbf-41b3-9ca1-26942fcb6cc2/register.duckdb",
+  "input": "local synthetic register export (empty-zero fixture generation)",
   "input_sha256": "dfc550f9b9f382389bf1d8b903aaae118d17006f49128509f1385c09bfba9eaf",
   "producer": "5a5088d exact installed wheel",
   "release_tag": "2026-10-23.1",

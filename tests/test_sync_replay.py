@@ -762,11 +762,10 @@ def test_v4_metadata_limit_and_redirect_withdrawn_replay(tmp_path: Path) -> None
     assert res.stamp_after == next_stamp
     con_after = duckdb.connect(str(settings.catalog_path), read_only=True)
     try:
-        cnt = con_after.execute(
+        row = con_after.execute(
             "SELECT count(*) FROM redirects WHERE from_id = 'rp99999999999901'"
-        ).fetchone()[0]
+        ).fetchone()
     finally:
         con_after.close()
-    assert cnt == 0
-
-
+    assert row is not None
+    assert row[0] == 0

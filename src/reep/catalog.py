@@ -706,9 +706,7 @@ def _apply_v4_change_feed_to_con(
     tables = _store.table_names(con)
     alias_has_is_primary = False
     if "aliases" in tables:
-        alias_cols = {
-            str(r[0]) for r in con.execute("DESCRIBE aliases").fetchall()
-        }
+        alias_cols = {str(r[0]) for r in con.execute("DESCRIBE aliases").fetchall()}
         alias_has_is_primary = "is_primary" in alias_cols
     pages_raw = feed.get("pages")
     if isinstance(pages_raw, list) and pages_raw:
@@ -850,9 +848,7 @@ def _apply_v4_change_feed_to_con(
                 if "overlay_aliases" in tables:
                     con.execute("DELETE FROM overlay_aliases WHERE reep_id = ?", [rid])
                 if "provider_aliases" in tables:
-                    con.execute(
-                        "DELETE FROM provider_aliases WHERE reep_id = ?", [rid]
-                    )
+                    con.execute("DELETE FROM provider_aliases WHERE reep_id = ?", [rid])
                 if "aliases" in tables:
                     con.execute("DELETE FROM aliases WHERE reep_id = ?", [rid])
             elif etype == "label_changed":
@@ -887,11 +883,7 @@ def _apply_v4_change_feed_to_con(
                             raw_before if isinstance(raw_before, dict) else None
                         )
                         old_label = str(
-                            (
-                                before_map.get("canonical_name")
-                                if before_map
-                                else None
-                            )
+                            (before_map.get("canonical_name") if before_map else None)
                             or (before_map.get("label") if before_map else None)
                             or ev.get("previous_label")
                             or ""
@@ -1008,8 +1000,7 @@ def _apply_v4_change_feed_to_con(
                     "WHERE provider = ? AND namespace = ? AND external_id = ?"
                 )
                 br_ins_sql = (
-                    "INSERT INTO bridges VALUES "
-                    "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                    "INSERT INTO bridges VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                 )
                 con.execute(br_del_sql, [provider, namespace, external_id])
                 con.execute(
